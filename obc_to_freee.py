@@ -1,0 +1,1161 @@
+#!/usr/bin/env python3
+"""
+obc_to_freee.py
+奉行 CP932 CSV (79列) → freee 仕訳インポート 33列拡張テンプレート UTF-8 BOM CSV
+
+Usage:
+    python3 obc_to_freee.py \
+        --input <上.csv> <下.csv> \
+        --output-dir /path/to/output \
+        --output-prefix freee用_仕訳データ_obc変換 \
+        --rows-per-file 10000 \
+        --from 2025/08/01 \
+        --to 2026/02/28
+"""
+
+import argparse
+import csv
+import os
+import re
+import sys
+from collections import OrderedDict, defaultdict
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# 定数
+# ---------------------------------------------------------------------------
+
+FREEE_HEADER = [
+    "[表題行]", "日付", "伝票番号", "決算整理仕訳",
+    "借方勘定科目", "借方科目コード", "借方補助科目", "借方取引先", "借方取引先コード",
+    "借方部門", "借方品目", "借方メモタグ", "借方セグメント1", "借方セグメント2", "借方セグメント3",
+    "借方金額", "借方税区分", "借方税額",
+    "貸方勘定科目", "貸方科目コード", "貸方補助科目", "貸方取引先", "貸方取引先コード",
+    "貸方部門", "貸方品目", "貸方メモタグ", "貸方セグメント1", "貸方セグメント2", "貸方セグメント3",
+    "貸方金額", "貸方税区分", "貸方税額",
+    "摘要",
+]
+assert len(FREEE_HEADER) == 33, f"ヘッダー列数が不正: {len(FREEE_HEADER)}"
+
+# 奉行の税区分略称 + 税率 → freee の税区分コード
+# キー: (税区分略称.strip(), 税率.strip())
+# 税率が空・"0" のケースも含む
+TAX_MAP = {
+    ("課仕入", "10"): "課対仕入10%",
+    ("課仕入", "8"):  "課対仕入8%(軽)",
+    ("課仕入", "0"):  "対象外",
+    ("課仕入", ""):   "対象外",
+    ("課売上", "10"): "課税売上10%",
+    ("課売上", "8"):  "課税売上8%(軽)",
+    ("課売上", "0"):  "対象外",
+    ("課売上", ""):   "対象外",
+    ("共仕入", "10"): "共対仕入10%",
+    ("共仕入", "8"):  "共対仕入8%(軽)",
+    ("共仕入", "0"):  "対象外",
+    ("共仕入", ""):   "対象外",
+    # 免税（非適格インボイス）
+    ("課仕免", "10"): "課対仕入（控80）10%",
+    ("課仕免", "8"):  "課対仕入（控80）8%(軽)",
+    ("課仕免", "0"):  "対象外",
+    ("課仕免", ""):   "対象外",
+    ("共仕免", "10"): "共対仕入（控80）10%",
+    ("共仕免", "8"):  "共対仕入（控80）8%(軽)",
+    ("共仕免", "0"):  "対象外",
+    ("共仕免", ""):   "対象外",
+    # 課税売上返品
+    ("課売返", "10"): "課税売上-返還等10%",
+    ("課売返", "8"):  "課税売上-返還等8%(軽)",
+    ("課売返", "0"):  "対象外",
+    ("課売返", ""):   "対象外",
+    # 非課税
+    ("非売上", "10"): "非課売上",
+    ("非売上", "8"):  "非課売上",
+    ("非売上", "0"):  "非課売上",
+    ("非売上", ""):   "非課売上",
+    ("非仕入", "10"): "非課仕入",
+    ("非仕入", "8"):  "非課仕入",
+    ("非仕入", "0"):  "非課仕入",
+    ("非仕入", ""):   "非課仕入",
+    # 対象外 / 空
+    ("対象外", ""):   "対象外",
+    ("対象外", "10"): "対象外",
+    ("対象外", "8"):  "対象外",
+    ("対象外", "0"):  "対象外",
+    ("", ""):         "対象外",
+    ("", "10"):       "対象外",
+    ("", "8"):        "対象外",
+    ("", "0"):        "対象外",
+}
+
+# エラーカテゴリ定数
+CAT_TAX = "CAT_TAX"
+CAT_AMOUNT = "CAT_AMOUNT"
+CAT_BALANCE_UNKNOWN = "CAT_BALANCE_UNKNOWN"
+CAT_DATE_FORMAT = "CAT_DATE_FORMAT"
+CAT_COLUMN_COUNT = "CAT_COLUMN_COUNT"
+
+OBC_EXPECTED_COLS = 79
+
+
+# ---------------------------------------------------------------------------
+# エラー収集クラス
+# ---------------------------------------------------------------------------
+
+class ConversionErrors:
+    """変換中に発生した全エラーを収集するクラス。"""
+
+    def __init__(self):
+        # 各カテゴリごとにリストでエラー詳細を保持
+        # CAT_TAX: {(label, rate): {"count": N, "examples": [(slip_no, date, side), ...],"filename":""}}
+        self._tax_map = {}   # key=(label, rate, filename) → dict
+        # その他カテゴリ: [{"filename":..., "line_no":..., "slip_no":..., "date":..., "detail":...}]
+        self._amount_errors = []
+        self._balance_errors = []
+        self._date_format_errors = []
+        self._column_count_errors = []
+
+    # ---- 追加メソッド ----
+
+    def add_tax(self, label: str, rate: str, filename: str, line_no: int,
+                slip_no: str, date: str, side: str):
+        k = (label, rate, filename)
+        if k not in self._tax_map:
+            self._tax_map[k] = {"label": label, "rate": rate, "filename": filename,
+                                "count": 0, "examples": []}
+        entry = self._tax_map[k]
+        entry["count"] += 1
+        if len(entry["examples"]) < 3:
+            entry["examples"].append((slip_no, date, side))
+
+    def add_amount(self, filename: str, line_no: int, slip_no: str, date: str,
+                   col_name: str, raw_val: str):
+        self._amount_errors.append({
+            "filename": filename, "line_no": line_no,
+            "slip_no": slip_no, "date": date,
+            "col_name": col_name, "raw_val": raw_val,
+        })
+
+    def add_balance(self, slip_no: str, date: str, dr: int, cr: int):
+        self._balance_errors.append({
+            "slip_no": slip_no, "date": date, "dr": dr, "cr": cr,
+        })
+
+    def add_date_format(self, filename: str, line_no: int, slip_no: str, raw_val: str):
+        self._date_format_errors.append({
+            "filename": filename, "line_no": line_no,
+            "slip_no": slip_no, "raw_val": raw_val,
+        })
+
+    def add_column_count(self, filename: str, line_no: int, actual_cols: int):
+        self._column_count_errors.append({
+            "filename": filename, "line_no": line_no, "actual_cols": actual_cols,
+        })
+
+    # ---- 集計 ----
+
+    def has_critical(self) -> bool:
+        """CAT_BALANCE_UNKNOWN (変換バグ) が1件以上あれば True。"""
+        return len(self._balance_errors) > 0
+
+    def total_count(self) -> int:
+        return (len(self._tax_map) +  # taxはパターン数ではなく発生件数合計
+                sum(e["count"] for e in self._tax_map.values()) +
+                len(self._amount_errors) +
+                len(self._balance_errors) +
+                len(self._date_format_errors) +
+                len(self._column_count_errors))
+
+    def error_event_count(self) -> int:
+        """実イベント件数 (分類ごと)。"""
+        tax_events = sum(e["count"] for e in self._tax_map.values())
+        return (tax_events + len(self._amount_errors) + len(self._balance_errors) +
+                len(self._date_format_errors) + len(self._column_count_errors))
+
+    # ---- 整形出力 ----
+
+    def print_report(self, total_input: int, total_output: int,
+                     input_files: list):
+        """stderr にカテゴリ別エラーレポートとサマリを出力する。"""
+        sep = "=" * 70
+
+        categories = []
+        if self._tax_map:
+            categories.append(CAT_TAX)
+        if self._amount_errors:
+            categories.append(CAT_AMOUNT)
+        if self._balance_errors:
+            categories.append(CAT_BALANCE_UNKNOWN)
+        if self._date_format_errors:
+            categories.append(CAT_DATE_FORMAT)
+        if self._column_count_errors:
+            categories.append(CAT_COLUMN_COUNT)
+
+        total_cats = len(categories)
+
+        for idx, cat in enumerate(categories, start=1):
+            print(sep, file=sys.stderr)
+            if cat == CAT_TAX:
+                self._print_tax(idx, total_cats)
+            elif cat == CAT_AMOUNT:
+                self._print_amount(idx, total_cats)
+            elif cat == CAT_BALANCE_UNKNOWN:
+                self._print_balance(idx, total_cats)
+            elif cat == CAT_DATE_FORMAT:
+                self._print_date_format(idx, total_cats)
+            elif cat == CAT_COLUMN_COUNT:
+                self._print_column_count(idx, total_cats)
+
+        # サマリ
+        print(sep, file=sys.stderr)
+        print("変換結果サマリ", file=sys.stderr)
+        print(sep, file=sys.stderr)
+        print(f"  入力行数: {total_input:,}", file=sys.stderr)
+        print(f"  出力行数: {total_output:,}", file=sys.stderr)
+
+        err_count = self.error_event_count()
+        file_set = set()
+        for e in self._tax_map.values():
+            file_set.add(e["filename"])
+        for e in self._amount_errors:
+            file_set.add(e["filename"])
+        for e in self._date_format_errors:
+            file_set.add(e["filename"])
+        for e in self._column_count_errors:
+            file_set.add(e["filename"])
+        for fpath in input_files:
+            pass  # balance エラーはファイル不明のため加算しない
+
+        if err_count == 0:
+            print(f"  検出エラー: 0 件 ✓", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("  ✅ 出力 CSV を freee へアップロード可能です。", file=sys.stderr)
+        else:
+            print(f"  検出エラー数: {err_count} 件", file=sys.stderr)
+            if file_set:
+                print(f"  検出ファイル数: {len(file_set)} ファイル", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("  ❌ エラーが検出されました。出力 CSV を freee へアップロードする前に", file=sys.stderr)
+            print("     上記のネクストアクションを実施してください。", file=sys.stderr)
+        print(sep, file=sys.stderr)
+
+    # ---- カテゴリ別出力ヘルパー ----
+
+    def _print_tax(self, idx: int, total: int):
+        tax_events = sum(e["count"] for e in self._tax_map.values())
+        print(f"[エラー {idx}/{total}] 想定外の税区分が見つかりました", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print("奉行原本に変換マッピング未登録の税区分が含まれていました。", file=sys.stderr)
+        print("該当行は税区分を「対象外」で仮置きして変換を継続しましたが、", file=sys.stderr)
+        print("freee アップロード前に必ず修正が必要です。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【検出パターン】", file=sys.stderr)
+        for entry in self._tax_map.values():
+            label = entry["label"]
+            rate = entry["rate"] if entry["rate"] else "(空)"
+            count = entry["count"]
+            filename = os.path.basename(entry["filename"])
+            print(f"  税区分略称: {repr(label)}   税率: {repr(rate)}   件数: {count} 行",
+                  file=sys.stderr)
+            ex_parts = []
+            for slip_no, date, side in entry["examples"]:
+                ex_parts.append(f"No.{slip_no} ({date}, {side})")
+            if ex_parts:
+                print(f"  → 伝票例: {', '.join(ex_parts)}", file=sys.stderr)
+            print(f"  → ファイル: {filename}", file=sys.stderr)
+            print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  以下のいずれかを実施してください:", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  方法 A: 奉行側で税区分を訂正する場合 (推奨)", file=sys.stderr)
+        print("    奉行で該当伝票の税区分を、freee に存在する区分へ修正してください。", file=sys.stderr)
+        print("    修正後、奉行から CSV を再エクスポートして、本スクリプトを再実行。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  方法 B: スクリプト側で新しい区分を受け入れる場合", file=sys.stderr)
+        print("    obc_to_freee.py の TAX_MAP (44 行目あたり) に該当エントリを追加:", file=sys.stderr)
+        for entry in self._tax_map.values():
+            label = entry["label"]
+            rate = entry["rate"]
+            print(f'        ("{label}", "{rate}"): "freee側の税区分コード",', file=sys.stderr)
+        print("    freee 税区分コード一覧:", file=sys.stderr)
+        print("      https://support.freee.co.jp/hc/ja/sections/115000302983", file=sys.stderr)
+        print("    追加後、再実行してください。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  ⚠️ 仮置き「対象外」のまま freee へアップロードすると消費税申告に支障が", file=sys.stderr)
+        print("  出る可能性があります。必ず本番アップロード前に対処してください。", file=sys.stderr)
+
+    def _print_amount(self, idx: int, total: int):
+        print(f"[エラー {idx}/{total}] 金額が数値として読めない行があります", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print("奉行原本の金額欄に数字以外の文字が含まれている行があります。", file=sys.stderr)
+        print("該当行は金額 0 で仮置きして変換を継続しましたが、freee 上で", file=sys.stderr)
+        print("当該伝票の金額が 0 円になります。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【検出された行】", file=sys.stderr)
+        for e in self._amount_errors:
+            filename = os.path.basename(e["filename"])
+            print(f"  ファイル: {filename}", file=sys.stderr)
+            slip_info = f"伝票No.{e['slip_no']}, 日付 {e['date']}" if e["slip_no"] else f"日付 {e['date']}"
+            print(f"  行番号 {e['line_no']} ({slip_info})", file=sys.stderr)
+            print(f"    {e['col_name']}: {repr(e['raw_val'])}  ← 数値変換不可", file=sys.stderr)
+            print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  1. 奉行で該当伝票を開き、金額欄を確認してください", file=sys.stderr)
+        print("  2. 数値以外の文字 (カンマ・全角数字・記号等) が混入していないか確認", file=sys.stderr)
+        print("  3. 修正後、奉行から CSV を再エクスポートして本スクリプトを再実行", file=sys.stderr)
+
+    def _print_balance(self, idx: int, total: int):
+        print(f"[エラー {idx}/{total}] 出力 CSV で借貸合計の不一致を検出 (変換バグの可能性)", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print("変換ロジック自体に問題があり、奉行原本では一致していた伝票が", file=sys.stderr)
+        print("出力 CSV で不一致になっています。これは経理担当の起票ミスではなく", file=sys.stderr)
+        print("スクリプトのバグです。出力 CSV はそのまま freee へ上げないでください。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【検出された伝票】", file=sys.stderr)
+        for e in self._balance_errors:
+            dr = e["dr"]
+            cr = e["cr"]
+            diff = dr - cr
+            print(f"  No.{e['slip_no']} ({e['date']}) 借方合計 {dr:,} / 貸方合計 {cr:,} / 差 {diff:,}",
+                  file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  スクリプト開発者へ以下を伝えてください:", file=sys.stderr)
+        print("  - 上記の伝票番号と日付", file=sys.stderr)
+        print("  - 使用したコマンド (再現用)", file=sys.stderr)
+        print("  - スクリプトのバージョン (ファイルのタイムスタンプ)", file=sys.stderr)
+
+    def _print_date_format(self, idx: int, total: int):
+        print(f"[エラー {idx}/{total}] 日付フォーマット異常", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print("奉行原本の日付欄が YYYY/MM/DD 形式になっていない行があります。", file=sys.stderr)
+        print("該当行は日付をそのまま出力して変換を継続していますが、", file=sys.stderr)
+        print("freee インポート時に日付エラーになる可能性があります。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【検出された行】", file=sys.stderr)
+        for e in self._date_format_errors:
+            filename = os.path.basename(e["filename"])
+            slip_info = f", 伝票No.{e['slip_no']}" if e["slip_no"] else ""
+            print(f"  ファイル: {filename}", file=sys.stderr)
+            print(f"  行番号 {e['line_no']}{slip_info}: 日付値 {repr(e['raw_val'])}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  奉行で該当伝票の日付を確認し、正しい日付に修正後、", file=sys.stderr)
+        print("  奉行から CSV を再エクスポートして本スクリプトを再実行してください。", file=sys.stderr)
+
+    def _print_column_count(self, idx: int, total: int):
+        print(f"[エラー {idx}/{total}] 奉行 CSV の列数が想定と異なる行があります", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"奉行 CSV は {OBC_EXPECTED_COLS} 列が想定ですが、列数が異なる行が見つかりました。", file=sys.stderr)
+        print("該当行は処理をスキップしています。", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【検出された行】", file=sys.stderr)
+        for e in self._column_count_errors[:20]:  # 最大20件
+            filename = os.path.basename(e["filename"])
+            print(f"  ファイル: {filename}  行番号 {e['line_no']}: {e['actual_cols']} 列 (想定: {OBC_EXPECTED_COLS})",
+                  file=sys.stderr)
+        if len(self._column_count_errors) > 20:
+            print(f"  ... 他 {len(self._column_count_errors) - 20} 件 (省略)", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  奉行から CSV を再エクスポートして本スクリプトを再実行してください。", file=sys.stderr)
+        print("  問題が続く場合はスクリプト開発者にご連絡ください。", file=sys.stderr)
+
+
+# グローバルエラー収集インスタンス (モジュールレベル)
+_errors = ConversionErrors()
+# 現在処理中のファイル名 (read_obc_csv 内でセット)
+_current_file = ""
+
+
+# ---------------------------------------------------------------------------
+# ユーティリティ
+# ---------------------------------------------------------------------------
+
+def normalize_cell(value: str) -> str:
+    """セル内改行・連続スペースを除去してstrip()する。"""
+    value = re.sub(r"[\r\n]+", " ", value)
+    value = re.sub(r" +", " ", value)
+    return value.strip()
+
+
+def map_tax(label: str, rate: str, context: str = "",
+            line_no: int = 0, slip_no: str = "", date: str = "",
+            side: str = "") -> str:
+    """
+    奉行の税区分略称と税率をfreee税区分コードに変換する。
+    想定外の組み合わせはエラーを収集して仮値「対象外」を返す。
+    """
+    key = (label.strip(), rate.strip())
+    if key not in TAX_MAP:
+        _errors.add_tax(
+            label=label.strip(),
+            rate=rate.strip(),
+            filename=_current_file,
+            line_no=line_no,
+            slip_no=slip_no,
+            date=date,
+            side=side,
+        )
+        return "対象外"
+    return TAX_MAP[key]
+
+
+def clean_auxiliary(val: str) -> str:
+    """補助科目の「その他」は空欄化。"""
+    v = normalize_cell(val)
+    return "" if v == "その他" else v
+
+
+def clean_partner_name(val: str) -> str:
+    """取引先名の「その他取引先」および空白のみは空欄化。"""
+    v = normalize_cell(val)
+    if v in ("その他取引先", ""):
+        return ""
+    return v
+
+
+def clean_partner_code(val: str) -> str:
+    """取引先コードの「000000」および空白のみは空欄化。"""
+    v = normalize_cell(val)
+    if v in ("000000", ""):
+        return ""
+    return v
+
+
+def clean_bumon(val: str) -> str:
+    """部門の「その他」は空欄化。"""
+    v = normalize_cell(val)
+    return "" if v == "その他" else v
+
+
+def parse_amount(val: str, col_name: str,
+                 line_no: int = 0, slip_no: str = "", date: str = "") -> str:
+    """
+    金額文字列を検証して返す。
+    空白のみ → "0" に正規化。数値変換できなければエラー収集して "0" を返す。
+    """
+    v = val.strip()
+    if v == "":
+        return "0"
+    try:
+        int(v)
+    except ValueError:
+        try:
+            float(v)
+        except ValueError:
+            _errors.add_amount(
+                filename=_current_file,
+                line_no=line_no,
+                slip_no=slip_no,
+                date=date,
+                col_name=col_name,
+                raw_val=val,
+            )
+            return "0"
+    return v
+
+
+# ---------------------------------------------------------------------------
+# 奉行1行 → freee33列辞書に変換
+# ---------------------------------------------------------------------------
+
+def obc_row_to_freee(row: list, line_no: int) -> dict:
+    """
+    奉行79列の1行をfreee33列の辞書に変換する。
+    Transformation 2 (普通預金→補助科目置換) を適用。
+    列番号は1-indexed仕様書に合わせて0-indexed変数を使用。
+    """
+    def col(i: int) -> str:
+        """1-indexedの列番号を0-indexedで取得。"""
+        idx = i - 1
+        return row[idx] if idx < len(row) else ""
+
+    slip_no = normalize_cell(col(12))
+    date = normalize_cell(col(11))
+
+    # --- 借方 ---
+    dr_kamoku = normalize_cell(col(18))
+    dr_hojo = clean_auxiliary(col(20))
+    dr_partner = clean_partner_name(col(36))
+    dr_partner_code = clean_partner_code(col(35))
+    dr_bumon = clean_bumon(col(16))
+    dr_amount = parse_amount(col(39), f"借方本体金額(col39)",
+                             line_no=line_no, slip_no=slip_no, date=date)
+    dr_tax_label = normalize_cell(col(22))
+    dr_tax_rate = normalize_cell(col(25))
+    dr_tax_amount = parse_amount(col(40), f"借方消費税額(col40)",
+                                 line_no=line_no, slip_no=slip_no, date=date)
+    dr_tax_code = map_tax(dr_tax_label, dr_tax_rate,
+                          context=f"借方 line={line_no}, 伝票No={slip_no}",
+                          line_no=line_no, slip_no=slip_no, date=date, side="借方")
+
+    # --- 貸方 ---
+    cr_kamoku = normalize_cell(col(44))
+    cr_hojo = clean_auxiliary(col(46))
+    cr_partner = clean_partner_name(col(62))
+    cr_partner_code = clean_partner_code(col(61))
+    cr_bumon = clean_bumon(col(42))
+    cr_amount = parse_amount(col(65), f"貸方本体金額(col65)",
+                             line_no=line_no, slip_no=slip_no, date=date)
+    cr_tax_label = normalize_cell(col(48))
+    cr_tax_rate = normalize_cell(col(51))
+    cr_tax_amount = parse_amount(col(66), f"貸方消費税額(col66)",
+                                 line_no=line_no, slip_no=slip_no, date=date)
+    cr_tax_code = map_tax(cr_tax_label, cr_tax_rate,
+                          context=f"貸方 line={line_no}, 伝票No={slip_no}",
+                          line_no=line_no, slip_no=slip_no, date=date, side="貸方")
+
+    # --- 摘要 ---
+    summary = normalize_cell(col(67))
+
+    # --- Transformation 2: 普通預金→補助科目置換 ---
+    if dr_kamoku == "普通預金" and dr_hojo:
+        dr_kamoku = dr_hojo
+        dr_hojo = ""
+    if cr_kamoku == "普通預金" and cr_hojo:
+        cr_kamoku = cr_hojo
+        cr_hojo = ""
+
+    return {
+        "date": date,
+        "slip_no": slip_no,
+        "dr_kamoku": dr_kamoku,
+        "dr_hojo": dr_hojo,
+        "dr_partner": dr_partner,
+        "dr_partner_code": dr_partner_code,
+        "dr_bumon": dr_bumon,
+        "dr_amount": dr_amount,
+        "dr_tax_code": dr_tax_code,
+        "dr_tax_amount": dr_tax_amount,
+        "cr_kamoku": cr_kamoku,
+        "cr_hojo": cr_hojo,
+        "cr_partner": cr_partner,
+        "cr_partner_code": cr_partner_code,
+        "cr_bumon": cr_bumon,
+        "cr_amount": cr_amount,
+        "cr_tax_code": cr_tax_code,
+        "cr_tax_amount": cr_tax_amount,
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Transformation 1: 「複合」補完 (行分解版)
+# ---------------------------------------------------------------------------
+
+def apply_fukugo(rows_by_slip: list, group_bumon: str) -> list:
+    """
+    同一伝票グループのrows_by_slipに対して「行分解」ロジックを適用し、
+    変換済みリストを返す。
+
+    奉行の1明細行は借方部分・貸方部分の有効性に応じて以下に分解する:
+      - 借方のみ有効: 1行 (借方=実データ, 貸方=複合)
+      - 貸方のみ有効: 1行 (借方=複合, 貸方=実データ)
+      - 両側有効    : 2行 (借方明細行 + 貸方明細行)
+      - 両側無効    : スキップ (警告ログ)
+
+    「複合」行の値:
+      - 勘定科目=複合, 補助科目=空, 取引先=空, 取引先コード=空
+      - 部門=反対側部門 (なければ group_bumon)
+      - 税区分=対象外, 税額=0
+      - 金額=実データ側と同額
+    """
+    result = []
+    for r in rows_by_slip:
+        debit_active = (r["dr_kamoku"] != "" and r["dr_amount"] != "0")
+        credit_active = (r["cr_kamoku"] != "" and r["cr_amount"] != "0")
+
+        if debit_active and not credit_active:
+            # 借方のみ → 1行: 借方=実データ, 貸方=複合
+            bumon = r["dr_bumon"] if r["dr_bumon"] else group_bumon
+            row = dict(r)
+            row["cr_kamoku"] = "複合"
+            row["cr_hojo"] = ""
+            row["cr_bumon"] = bumon
+            row["cr_tax_code"] = "対象外"
+            row["cr_amount"] = r["dr_amount"]
+            row["cr_tax_amount"] = "0"
+            row["cr_partner"] = ""
+            row["cr_partner_code"] = ""
+            result.append(row)
+
+        elif credit_active and not debit_active:
+            # 貸方のみ → 1行: 借方=複合, 貸方=実データ
+            bumon = r["cr_bumon"] if r["cr_bumon"] else group_bumon
+            row = dict(r)
+            row["dr_kamoku"] = "複合"
+            row["dr_hojo"] = ""
+            row["dr_bumon"] = bumon
+            row["dr_tax_code"] = "対象外"
+            row["dr_amount"] = r["cr_amount"]
+            row["dr_tax_amount"] = "0"
+            row["dr_partner"] = ""
+            row["dr_partner_code"] = ""
+            result.append(row)
+
+        elif debit_active and credit_active:
+            # 両側有効 → 2行に分解
+            bumon_for_cr_side = r["dr_bumon"] if r["dr_bumon"] else group_bumon
+            bumon_for_dr_side = r["cr_bumon"] if r["cr_bumon"] else group_bumon
+
+            # 行1: 借方=実データ, 貸方=複合 (借方明細)
+            dr_row = dict(r)
+            dr_row["cr_kamoku"] = "複合"
+            dr_row["cr_hojo"] = ""
+            dr_row["cr_bumon"] = bumon_for_cr_side
+            dr_row["cr_tax_code"] = "対象外"
+            dr_row["cr_amount"] = r["dr_amount"]
+            dr_row["cr_tax_amount"] = "0"
+            dr_row["cr_partner"] = ""
+            dr_row["cr_partner_code"] = ""
+            result.append(dr_row)
+
+            # 行2: 借方=複合, 貸方=実データ (貸方明細)
+            cr_row = dict(r)
+            cr_row["dr_kamoku"] = "複合"
+            cr_row["dr_hojo"] = ""
+            cr_row["dr_bumon"] = bumon_for_dr_side
+            cr_row["dr_tax_code"] = "対象外"
+            cr_row["dr_amount"] = r["cr_amount"]
+            cr_row["dr_tax_amount"] = "0"
+            cr_row["dr_partner"] = ""
+            cr_row["dr_partner_code"] = ""
+            result.append(cr_row)
+
+        else:
+            # 両側無効 (勘定科目空 + 金額0) → 奉行の空パディング行としてスキップ
+            # None をマーカーとして追加 (呼び出し元で集計)
+            result.append(None)
+
+    # None (スキップ行) を除去して返す。件数カウントのみ返す
+    skipped = sum(1 for r in result if r is None)
+    result = [r for r in result if r is not None]
+    return result, skipped
+
+
+def find_group_bumon(rows: list) -> str:
+    """グループ内の借方・貸方部門からフォールバック部門を探す。"""
+    for r in rows:
+        if r.get("dr_bumon"):
+            return r["dr_bumon"]
+    for r in rows:
+        if r.get("cr_bumon"):
+            return r["cr_bumon"]
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# freee33列リストに変換
+# ---------------------------------------------------------------------------
+
+def to_freee_row(r: dict) -> list:
+    """辞書をfreee33列リストに変換する。"""
+    return [
+        "[明細行]",          # [表題行]
+        r["date"],           # 日付
+        r["slip_no"],        # 伝票番号
+        "",                  # 決算整理仕訳
+        r["dr_kamoku"],      # 借方勘定科目
+        "",                  # 借方科目コード
+        r["dr_hojo"],        # 借方補助科目
+        r["dr_partner"],     # 借方取引先
+        r["dr_partner_code"],# 借方取引先コード
+        r["dr_bumon"],       # 借方部門
+        "",                  # 借方品目
+        "",                  # 借方メモタグ
+        "",                  # 借方セグメント1
+        "",                  # 借方セグメント2
+        "",                  # 借方セグメント3
+        r["dr_amount"],      # 借方金額
+        r["dr_tax_code"],    # 借方税区分
+        r["dr_tax_amount"],  # 借方税額
+        r["cr_kamoku"],      # 貸方勘定科目
+        "",                  # 貸方科目コード
+        r["cr_hojo"],        # 貸方補助科目
+        r["cr_partner"],     # 貸方取引先
+        r["cr_partner_code"],# 貸方取引先コード
+        r["cr_bumon"],       # 貸方部門
+        "",                  # 貸方品目
+        "",                  # 貸方メモタグ
+        "",                  # 貸方セグメント1
+        "",                  # 貸方セグメント2
+        "",                  # 貸方セグメント3
+        r["cr_amount"],      # 貸方金額
+        r["cr_tax_code"],    # 貸方税区分
+        r["cr_tax_amount"],  # 貸方税額
+        r["summary"],        # 摘要
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 奉行CSVの読み込み・変換
+# ---------------------------------------------------------------------------
+
+_DATE_PATTERN = re.compile(r"^\d{4}/\d{2}/\d{2}$")
+
+
+def read_obc_csv(filepath: str, date_from=None, date_to=None) -> list:
+    """
+    奉行CP932 CSVを読み込み、freee行辞書のリストを返す。
+    date_from/date_to が指定されている場合、期間外の伝票を除外する。
+    戻り値は OrderedDict 形式: {slip_key: [行辞書, ...], ...}
+    """
+    global _current_file
+    _current_file = filepath
+
+    groups = OrderedDict()
+
+    with open(filepath, encoding="cp932", errors="replace") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return groups
+
+        for line_no, row in enumerate(reader, start=2):
+            if not row:
+                continue
+
+            # 列数チェック (想定: OBC_EXPECTED_COLS=79)
+            if len(row) != OBC_EXPECTED_COLS:
+                if len(row) < 67:
+                    # 最低限の処理に必要な列もないためスキップ
+                    _errors.add_column_count(
+                        filename=filepath,
+                        line_no=line_no,
+                        actual_cols=len(row),
+                    )
+                    continue
+                else:
+                    # 処理は継続するがエラーとして記録
+                    _errors.add_column_count(
+                        filename=filepath,
+                        line_no=line_no,
+                        actual_cols=len(row),
+                    )
+
+            # 日付 (col11, 0-index=10)
+            date_str = row[10].strip()
+            if not date_str:
+                continue
+
+            # 日付フォーマットチェック
+            slip_no_raw = row[11].strip() if len(row) > 11 else ""
+            if not _DATE_PATTERN.match(date_str):
+                _errors.add_date_format(
+                    filename=filepath,
+                    line_no=line_no,
+                    slip_no=slip_no_raw,
+                    raw_val=date_str,
+                )
+
+            # 期間フィルタ
+            if date_from or date_to:
+                try:
+                    row_date = datetime.strptime(date_str, "%Y/%m/%d")
+                    if date_from and row_date < date_from:
+                        continue
+                    if date_to and row_date > date_to:
+                        continue
+                except ValueError:
+                    pass  # 日付パース失敗はスキップせず変換を続ける
+
+            # 変換
+            d = obc_row_to_freee(row, line_no)
+
+            # グループキー: (日付, 伝票No)
+            key = (d["date"], d["slip_no"])
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(d)
+
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# グループ処理 (Transformation 1 適用)
+# ---------------------------------------------------------------------------
+
+def process_groups(groups: OrderedDict) -> tuple:
+    """
+    全グループに複合補完を適用し、(freee33列の行リスト, グループ別行数リスト) を返す。
+    グループ別行数リストは [(key, freee行数), ...] の順序付きリスト。
+    行分解により1奉行行が2freee行になる場合があるため、
+    実際の出力行数を正確に計算する。
+    """
+    all_rows = []
+    slip_sizes = []
+    total_skipped = 0
+    for key, slip_rows in groups.items():
+        group_bumon = find_group_bumon(slip_rows)
+        completed, skipped = apply_fukugo(slip_rows, group_bumon)
+        total_skipped += skipped
+        freee_rows = [to_freee_row(r) for r in completed]
+        all_rows.extend(freee_rows)
+        slip_sizes.append((key, len(freee_rows)))
+    if total_skipped > 0:
+        print(
+            f"WARN: 借方・貸方ともに空の行 (奉行の空パディング行) を合計 {total_skipped} 件スキップ"
+        )
+    return all_rows, slip_sizes
+
+
+# ---------------------------------------------------------------------------
+# 伝票単位 借貸整合性チェック
+# ---------------------------------------------------------------------------
+
+# 奉行原本でも不一致だった伝票 (既知)
+KNOWN_MISMATCH_SLIPS = {"002193", "002820", "003305", "003613", "005192", "005195"}
+
+
+def check_slip_balance(all_rows: list, label: str = "") -> bool:
+    """
+    出力行リストを伝票(日付+伝票番号)単位でグループ化し、
+    借方金額合計と貸方金額合計を比較する。
+
+    - 既知不一致6件 → WARN: として表示 (継続)
+    - それ以外の不一致 → ERROR: として表示、_errors に追加 (is_ok=False)
+
+    Returns:
+        bool: 未知の不一致が0件なら True、1件以上なら False
+    """
+    # インデックス: 借方金額=col15 (0-index), 貸方金額=col29 (0-index)
+    # all_rows の各要素は to_freee_row() が返す 33列リスト
+    # col index: [表題行]=0, 日付=1, 伝票番号=2, ..., 借方金額=15, 貸方金額=29
+
+    slip_dr = defaultdict(int)
+    slip_cr = defaultdict(int)
+
+    for row in all_rows:
+        key = (row[1], row[2])  # (日付, 伝票番号)
+        try:
+            slip_dr[key] += int(str(row[15]).strip() or "0")
+        except (ValueError, IndexError):
+            pass
+        try:
+            slip_cr[key] += int(str(row[29]).strip() or "0")
+        except (ValueError, IndexError):
+            pass
+
+    unknown_mismatches = []
+    known_mismatches = []
+
+    for key in sorted(slip_dr.keys()):
+        dr = slip_dr[key]
+        cr = slip_cr[key]
+        if dr != cr:
+            date_str, slip_no = key
+            if slip_no in KNOWN_MISMATCH_SLIPS:
+                known_mismatches.append((date_str, slip_no, dr, cr))
+            else:
+                unknown_mismatches.append((date_str, slip_no, dr, cr))
+
+    prefix = f"[{label}] " if label else ""
+
+    if known_mismatches:
+        print(f"{prefix}奉行原本由来の既知不一致 ({len(known_mismatches)} 件):")
+        for date_str, slip_no, dr, cr in known_mismatches:
+            print(f"  WARN: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}")
+
+    if unknown_mismatches:
+        print(f"{prefix}*** 未知の不一致 ({len(unknown_mismatches)} 件) - 変換バグの可能性 ***:")
+        for date_str, slip_no, dr, cr in unknown_mismatches:
+            print(f"  ERROR: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}")
+            # エラー収集にも追加
+            _errors.add_balance(slip_no=slip_no, date=date_str, dr=dr, cr=cr)
+        return False
+
+    print(f"{prefix}借貸整合性チェック: 奉行原本既知不一致 {len(known_mismatches)} 件のみ → PASS")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 出力CSVの書き込み (伝票境界をまたがないファイル分割)
+# ---------------------------------------------------------------------------
+
+def write_output(
+    all_rows: list,
+    slip_sizes: list,
+    output_dir: str,
+    prefix: str,
+    rows_per_file: int,
+):
+    """
+    freee33列行リストを分割してUTF-8 BOM CSVに書き出す。
+    伝票(日付+伝票番号)の途中で分割しない。
+    slip_sizes は [(key, freee行数), ...] の形式 (process_groups が返す値)。
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not all_rows:
+        print("出力対象の行がありません。")
+        return []
+
+    file_index = 1
+    written_files = []
+    row_cursor = 0  # all_rows 内のポインタ
+    slip_cursor = 0  # slip_sizes 内のポインタ
+
+    while slip_cursor < len(slip_sizes):
+        outpath = os.path.join(output_dir, f"{prefix}_{file_index:03d}.csv")
+        file_rows = []
+        current_count = 0
+
+        while slip_cursor < len(slip_sizes):
+            _, slip_size = slip_sizes[slip_cursor]
+
+            # しきい値に達しているが伝票境界ならファイルを閉じる
+            # (ただし1伝票もまだ書いていない場合はそのまま書く)
+            if current_count >= rows_per_file and current_count > 0:
+                break
+
+            # この伝票の行を追加
+            for i in range(slip_size):
+                file_rows.append(all_rows[row_cursor + i])
+            row_cursor += slip_size
+            current_count += slip_size
+            slip_cursor += 1
+
+        with open(outpath, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(FREEE_HEADER)
+            writer.writerows(file_rows)
+
+        written_files.append((outpath, len(file_rows)))
+        print(f"  書き出し: {outpath}  ({len(file_rows)} 行)")
+        file_index += 1
+
+    return written_files
+
+
+# ---------------------------------------------------------------------------
+# 奉行原本監査 (stderr 出力)
+# ---------------------------------------------------------------------------
+
+def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: bool = False):
+    """
+    奉行原本 CSV を直接走査して以下の2種を stderr に出力する。
+      A: 伝票単位の借貸不一致 (col39=借方本体金額, col65=貸方本体金額)
+      B: 課売上 + マイナス金額の返品疑い行 (col22=借方税区分略称, col48=貸方税区分略称)
+
+    date_from/date_to の期間外伝票は除外 (変換対象と同一範囲のみ警告)。
+    quiet=True の場合は何も出力しない。
+    """
+    if quiet:
+        return
+
+    # --- 集計用データ構造 ---
+    # A: slip_key -> (date_str, dr_total, cr_total)
+    slip_dr: dict = defaultdict(int)
+    slip_cr: dict = defaultdict(int)
+    slip_date: dict = {}
+
+    # B: 返品疑い行リスト [(slip_no, date_str, side, amount, summary), ...]
+    minus_kaubai: list = []
+
+    for fpath in input_files:
+        try:
+            with open(fpath, encoding="cp932", errors="replace") as f:
+                reader = csv.reader(f)
+                try:
+                    next(reader)  # ヘッダースキップ
+                except StopIteration:
+                    continue
+
+                for row in reader:
+                    if not row or len(row) < 67:
+                        continue
+
+                    date_str = row[10].strip()  # col11 (0-index=10)
+                    if not date_str:
+                        continue
+
+                    # 期間フィルタ (変換と同一ロジック)
+                    if date_from or date_to:
+                        try:
+                            row_date = datetime.strptime(date_str, "%Y/%m/%d")
+                            if date_from and row_date < date_from:
+                                continue
+                            if date_to and row_date > date_to:
+                                continue
+                        except ValueError:
+                            pass
+
+                    slip_no = row[11].strip()  # col12 (0-index=11)
+                    slip_key = (date_str, slip_no)
+
+                    # --- A: 借貸金額集計 ---
+                    dr_val = row[38].strip()  # col39 借方本体金額 (0-index=38)
+                    cr_val = row[64].strip()  # col65 貸方本体金額 (0-index=64)
+                    try:
+                        slip_dr[slip_key] += int(dr_val) if dr_val else 0
+                    except ValueError:
+                        pass
+                    try:
+                        slip_cr[slip_key] += int(cr_val) if cr_val else 0
+                    except ValueError:
+                        pass
+                    slip_date[slip_key] = date_str
+
+                    # --- B: 課売上 + マイナス ---
+                    summary = row[66].strip() if len(row) > 66 else ""  # col67 摘要
+
+                    # 借方側: col22=借方税区分略称 (0-index=21), col39=借方本体金額 (0-index=38)
+                    dr_tax_label = row[21].strip()
+                    if dr_tax_label == "課売上":
+                        try:
+                            dr_amount_int = int(dr_val) if dr_val else 0
+                            if dr_amount_int < 0:
+                                minus_kaubai.append((slip_no, date_str, "借方", dr_amount_int, summary))
+                        except ValueError:
+                            pass
+
+                    # 貸方側: col48=貸方税区分略称 (0-index=47), col65=貸方本体金額 (0-index=64)
+                    cr_tax_label = row[47].strip()
+                    if cr_tax_label == "課売上":
+                        try:
+                            cr_amount_int = int(cr_val) if cr_val else 0
+                            if cr_amount_int < 0:
+                                minus_kaubai.append((slip_no, date_str, "貸方", cr_amount_int, summary))
+                        except ValueError:
+                            pass
+
+        except OSError as e:
+            print(f"WARN: 監査用ファイル読み込み失敗: {fpath}: {e}", file=sys.stderr)
+
+    # --- 不一致伝票の抽出 ---
+    mismatch_slips = []
+    for key in sorted(slip_dr.keys()):
+        dr = slip_dr[key]
+        cr = slip_cr[key]
+        if dr != cr:
+            mismatch_slips.append((key[1], slip_date[key], dr, cr))  # (slip_no, date, dr, cr)
+
+    # --- stderr 出力 ---
+    sep = "=" * 70
+    print(sep, file=sys.stderr)
+    print("[要確認 1/2] 奉行原本由来の借貸不一致伝票 (経理担当の手動確認推奨)", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("変換スクリプトは奉行原本のまま freee 形式へ展開しています。", file=sys.stderr)
+    print("freee の各行は借貸一致するよう自動調整しますが、奉行原本の起票時点で", file=sys.stderr)
+    print("借方合計 ≠ 貸方合計の伝票は freee インポート後も合計差が残る可能性があります。", file=sys.stderr)
+    print("", file=sys.stderr)
+    if mismatch_slips:
+        for slip_no, date_str, dr, cr in mismatch_slips:
+            diff = dr - cr
+            sign = "+" if diff >= 0 else ""
+            print(
+                f"  No. {slip_no} (日付 {date_str}) "
+                f"借方合計 {dr:>9,} / 貸方合計 {cr:>9,} / 差 {sign}{diff:,}",
+                file=sys.stderr,
+            )
+        print(f"  合計 {len(mismatch_slips)} 件", file=sys.stderr)
+    else:
+        print("  (該当なし)", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("[要確認 2/2] 課売上区分 + マイナス金額の返品疑い (課売返 への振替検討)", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("返品/値引き仕訳は本来「課売返」区分が望ましいですが、", file=sys.stderr)
+    print("以下の仕訳は「課売上」区分のままマイナス金額で起票されています。", file=sys.stderr)
+    print("freee 取り込み後の消費税申告で「課税売上-返還等」への振替が必要な", file=sys.stderr)
+    print("可能性があるため、経理担当の判断推奨。", file=sys.stderr)
+    print("", file=sys.stderr)
+    if minus_kaubai:
+        for slip_no, date_str, side, amount, summary in minus_kaubai:
+            summary_short = summary[:20] if summary else ""
+            print(
+                f"  No. {slip_no} ({date_str}) {side} 金額 {amount:,} 摘要: {summary_short}",
+                file=sys.stderr,
+            )
+        print(f"  合計 {len(minus_kaubai)} 件", file=sys.stderr)
+    else:
+        print("  (該当なし)", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("変換処理は正常完了しました。上記は freee エラー扱いではなく、", file=sys.stderr)
+    print("経理担当の業務的確認を推奨する項目です。", file=sys.stderr)
+    print(sep, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# メイン
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="奉行CP932 CSV → freee 33列 UTF-8 BOM CSV 変換")
+    parser.add_argument("--input", nargs="+", required=True, help="奉行CSVファイルパス (複数可)")
+    parser.add_argument("--output-dir", required=True, help="出力先ディレクトリ")
+    parser.add_argument("--output-prefix", default="freee用_仕訳データ_obc変換", help="出力ファイル名プレフィックス")
+    parser.add_argument("--rows-per-file", type=int, default=10000, help="ファイルあたり最大行数 (伝票境界をまたがない)")
+    parser.add_argument("--from", dest="date_from", default=None, help="開始日 YYYY/MM/DD (両端含む)")
+    parser.add_argument("--to", dest="date_to", default=None, help="終了日 YYYY/MM/DD (両端含む)")
+    parser.add_argument("--quiet-audit", action="store_true", help="監査ログ (stderr) を抑制する")
+    args = parser.parse_args()
+
+    # 期間パース
+    date_from = None
+    date_to = None
+    if args.date_from:
+        date_from = datetime.strptime(args.date_from, "%Y/%m/%d")
+    if args.date_to:
+        date_to = datetime.strptime(args.date_to, "%Y/%m/%d")
+
+    # 複数ファイルを順に読み込んでグループ統合
+    all_groups = OrderedDict()
+    total_input = 0
+    for fpath in args.input:
+        print(f"読み込み: {fpath}")
+        groups = read_obc_csv(fpath, date_from, date_to)
+        for key, rows in groups.items():
+            if key not in all_groups:
+                all_groups[key] = []
+            all_groups[key].extend(rows)
+            total_input += len(rows)
+        print(f"  → {sum(len(v) for v in groups.values())} 行を読み込み (期間フィルタ後)")
+
+    print(f"合計入力行数 (期間フィルタ後): {total_input}")
+    print(f"伝票グループ数: {len(all_groups)}")
+
+    # 全グループ変換 (process_groups は (all_rows, slip_sizes) を返す)
+    all_rows, slip_sizes = process_groups(all_groups)
+    print(f"出力行数: {len(all_rows)}")
+
+    # 伝票単位借貸整合性チェック (ファイル書き出し前)
+    print()
+    balance_ok = check_slip_balance(all_rows, label=args.output_prefix)
+    print()
+
+    # 出力 (balance NG でも出力はスキップせず、サマリで警告)
+    written = write_output(
+        all_rows,
+        slip_sizes,
+        args.output_dir,
+        args.output_prefix,
+        args.rows_per_file,
+    )
+
+    print(f"\n完了: {len(written)} ファイル出力")
+    for path, count in written:
+        print(f"  {path}  ({count} データ行 + 1 ヘッダー行)")
+
+    # 奉行原本監査ログ (stderr)
+    audit_obc_source(args.input, date_from, date_to, quiet=args.quiet_audit)
+
+    # エラーレポート (stderr)
+    _errors.print_report(
+        total_input=total_input,
+        total_output=len(all_rows),
+        input_files=args.input,
+    )
+
+    # 終了コード: CAT_BALANCE_UNKNOWN (変換バグ) があれば 1
+    if _errors.has_critical():
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

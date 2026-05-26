@@ -1,0 +1,20 @@
+# 実会計データは絶対に commit しない
+output/
+*奉行*
+*奉行*.csv
+freee用_仕訳データ*.csv
+*_修正済*
+*_修正済*.csv
+*_修正.xlsx
+
+# 一時ファイル
+*.pyc
+__pycache__/
+.DS_Store
+*.swp
+*.tmp
+
+# 環境
+.venv/
+venv/
+.env
