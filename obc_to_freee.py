@@ -994,7 +994,7 @@ def write_output(
     os.makedirs(output_dir, exist_ok=True)
 
     if not all_rows:
-        print("出力対象の行がありません。")
+        print("出力対象の行がありません。", file=sys.stderr)
         return []
 
     file_index = 1
@@ -1174,8 +1174,8 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     print(sep, file=sys.stderr)
     print("返品/値引き仕訳は本来「課売返」区分が望ましいですが、", file=sys.stderr)
     print("以下の仕訳は「課売上」区分のままマイナス金額で起票されています。", file=sys.stderr)
-    print("freee 取り込み後の消費税申告で「課税売上-返還等」への振替が必要な", file=sys.stderr)
-    print("可能性があるため、経理担当の判断推奨。", file=sys.stderr)
+    print("freee 取り込み後の消費税申告で「課税売上 − 返還等」(freee 税区分コード: 課税売返) への", file=sys.stderr)
+    print("振替が必要な可能性があるため、経理担当の判断推奨。", file=sys.stderr)
     print("", file=sys.stderr)
     if minus_kaubai:
         for slip_no, date_str, side, amount, summary in minus_kaubai:
