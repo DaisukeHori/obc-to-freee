@@ -218,14 +218,6 @@ class ConversionErrors:
         """CAT_BALANCE_UNKNOWN (変換バグ) が1件以上あれば True。"""
         return len(self._balance_errors) > 0
 
-    def total_count(self) -> int:
-        return (len(self._tax_map) +  # taxはパターン数ではなく発生件数合計
-                sum(e["count"] for e in self._tax_map.values()) +
-                len(self._amount_errors) +
-                len(self._balance_errors) +
-                len(self._date_format_errors) +
-                len(self._column_count_errors))
-
     def error_event_count(self) -> int:
         """実イベント件数 (分類ごと)。"""
         tax_events = sum(e["count"] for e in self._tax_map.values())
@@ -332,7 +324,7 @@ class ConversionErrors:
         print("    修正後、奉行から CSV を再エクスポートして、本スクリプトを再実行。", file=sys.stderr)
         print("", file=sys.stderr)
         print("  方法 B: スクリプト側で新しい区分を受け入れる場合", file=sys.stderr)
-        print("    obc_to_freee.py の TAX_MAP (44 行目あたり) に該当エントリを追加:", file=sys.stderr)
+        print("    obc_to_freee.py ファイル冒頭の TAX_MAP 辞書に該当エントリを追加:", file=sys.stderr)
         for entry in self._tax_map.values():
             label = entry["label"]
             rate = entry["rate"]
