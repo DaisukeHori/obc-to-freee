@@ -98,9 +98,6 @@ CAT_TAX = "CAT_TAX"
 CAT_AMOUNT = "CAT_AMOUNT"
 CAT_BALANCE_UNKNOWN = "CAT_BALANCE_UNKNOWN"
 CAT_DATE_FORMAT = "CAT_DATE_FORMAT"
-CAT_COLUMN_COUNT = "CAT_COLUMN_COUNT"
-
-OBC_EXPECTED_COLS = 79
 
 # ---------------------------------------------------------------------------
 # 奉行 CSV カラム名定数
@@ -173,7 +170,6 @@ class ConversionErrors:
         self._amount_errors = []
         self._balance_errors = []
         self._date_format_errors = []
-        self._column_count_errors = []
 
     # ---- 追加メソッド ----
 
@@ -207,11 +203,6 @@ class ConversionErrors:
             "slip_no": slip_no, "raw_val": raw_val,
         })
 
-    def add_column_count(self, filename: str, line_no: int, actual_cols: int):
-        self._column_count_errors.append({
-            "filename": filename, "line_no": line_no, "actual_cols": actual_cols,
-        })
-
     # ---- 集計 ----
 
     def has_critical(self) -> bool:
@@ -222,12 +213,11 @@ class ConversionErrors:
         """実イベント件数 (分類ごと)。"""
         tax_events = sum(e["count"] for e in self._tax_map.values())
         return (tax_events + len(self._amount_errors) + len(self._balance_errors) +
-                len(self._date_format_errors) + len(self._column_count_errors))
+                len(self._date_format_errors))
 
     # ---- 整形出力 ----
 
-    def print_report(self, total_input: int, total_output: int,
-                     input_files: list):
+    def print_report(self, total_input: int, total_output: int):
         """stderr にカテゴリ別エラーレポートとサマリを出力する。"""
         sep = "=" * 70
 
@@ -240,8 +230,6 @@ class ConversionErrors:
             categories.append(CAT_BALANCE_UNKNOWN)
         if self._date_format_errors:
             categories.append(CAT_DATE_FORMAT)
-        if self._column_count_errors:
-            categories.append(CAT_COLUMN_COUNT)
 
         total_cats = len(categories)
 
@@ -255,8 +243,6 @@ class ConversionErrors:
                 self._print_balance(idx, total_cats)
             elif cat == CAT_DATE_FORMAT:
                 self._print_date_format(idx, total_cats)
-            elif cat == CAT_COLUMN_COUNT:
-                self._print_column_count(idx, total_cats)
 
         # サマリ
         print(sep, file=sys.stderr)
@@ -273,10 +259,6 @@ class ConversionErrors:
             file_set.add(e["filename"])
         for e in self._date_format_errors:
             file_set.add(e["filename"])
-        for e in self._column_count_errors:
-            file_set.add(e["filename"])
-        for fpath in input_files:
-            pass  # balance エラーはファイル不明のため加算しない
 
         if err_count == 0:
             print(f"  検出エラー: 0 件 ✓", file=sys.stderr)
@@ -394,24 +376,6 @@ class ConversionErrors:
         print("【ネクストアクション】", file=sys.stderr)
         print("  奉行で該当伝票の日付を確認し、正しい日付に修正後、", file=sys.stderr)
         print("  奉行から CSV を再エクスポートして本スクリプトを再実行してください。", file=sys.stderr)
-
-    def _print_column_count(self, idx: int, total: int):
-        print(f"[エラー {idx}/{total}] 奉行 CSV の列数が想定と異なる行があります", file=sys.stderr)
-        print("=" * 70, file=sys.stderr)
-        print(f"奉行 CSV は {OBC_EXPECTED_COLS} 列が想定ですが、列数が異なる行が見つかりました。", file=sys.stderr)
-        print("該当行は処理をスキップしています。", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("【検出された行】", file=sys.stderr)
-        for e in self._column_count_errors[:20]:  # 最大20件
-            filename = os.path.basename(e["filename"])
-            print(f"  ファイル: {filename}  行番号 {e['line_no']}: {e['actual_cols']} 列 (想定: {OBC_EXPECTED_COLS})",
-                  file=sys.stderr)
-        if len(self._column_count_errors) > 20:
-            print(f"  ... 他 {len(self._column_count_errors) - 20} 件 (省略)", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("【ネクストアクション】", file=sys.stderr)
-        print("  奉行から CSV を再エクスポートして本スクリプトを再実行してください。", file=sys.stderr)
-        print("  問題が続く場合はスクリプト開発者にご連絡ください。", file=sys.stderr)
 
 
 # グローバルエラー収集インスタンス (モジュールレベル)
@@ -936,7 +900,8 @@ def process_groups(groups: OrderedDict) -> tuple:
         slip_sizes.append((key, len(freee_rows)))
     if total_skipped > 0:
         print(
-            f"WARN: 借方・貸方ともに空の行 (奉行の空パディング行) を合計 {total_skipped} 件スキップ"
+            f"WARN: 借方・貸方ともに空の行 (奉行の空パディング行) を合計 {total_skipped} 件スキップ",
+            file=sys.stderr,
         )
     return all_rows, slip_sizes
 
@@ -994,19 +959,19 @@ def check_slip_balance(all_rows: list, label: str = "") -> bool:
     prefix = f"[{label}] " if label else ""
 
     if known_mismatches:
-        print(f"{prefix}奉行原本由来の既知不一致 ({len(known_mismatches)} 件):")
+        print(f"{prefix}奉行原本由来の既知不一致 ({len(known_mismatches)} 件):", file=sys.stderr)
         for date_str, slip_no, dr, cr in known_mismatches:
-            print(f"  WARN: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}")
+            print(f"  WARN: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}", file=sys.stderr)
 
     if unknown_mismatches:
-        print(f"{prefix}*** 未知の不一致 ({len(unknown_mismatches)} 件) - 変換バグの可能性 ***:")
+        print(f"{prefix}*** 未知の不一致 ({len(unknown_mismatches)} 件) - 変換バグの可能性 ***:", file=sys.stderr)
         for date_str, slip_no, dr, cr in unknown_mismatches:
-            print(f"  ERROR: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}")
+            print(f"  ERROR: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}", file=sys.stderr)
             # エラー収集にも追加
             _errors.add_balance(slip_no=slip_no, date=date_str, dr=dr, cr=cr)
         return False
 
-    print(f"{prefix}借貸整合性チェック: 奉行原本既知不一致 {len(known_mismatches)} 件のみ → PASS")
+    print(f"{prefix}借貸整合性チェック: 奉行原本既知不一致 {len(known_mismatches)} 件のみ → PASS", file=sys.stderr)
     return True
 
 
@@ -1305,7 +1270,6 @@ def main():
     _errors.print_report(
         total_input=total_input,
         total_output=len(all_rows),
-        input_files=args.input,
     )
 
     # 終了コード: CAT_BALANCE_UNKNOWN (変換バグ) があれば 1
