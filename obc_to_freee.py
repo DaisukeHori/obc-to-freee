@@ -1028,6 +1028,7 @@ def write_output(
             writer.writerows(file_rows)
 
         written_files.append((outpath, len(file_rows)))
+        # 進捗系: 書き出し・完了サマリは stdout (パイプ後処理用)。診断系のみ stderr。
         print(f"  書き出し: {outpath}  ({len(file_rows)} 行)")
         file_index += 1
 
