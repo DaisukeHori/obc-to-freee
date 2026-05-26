@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 obc_to_freee.py
-奉行 CP932 CSV (79列) → freee 仕訳インポート 33列拡張テンプレート UTF-8 BOM CSV
+奉行 CSV (CP932 / UTF-8 / UTF-8 BOM) → freee 仕訳インポート 33列拡張テンプレート UTF-8 BOM CSV
+
+エンコーディングは自動判定 (--encoding auto) または明示指定。
+カラムはヘッダー名で参照するため、列順序変更に対して堅牢。
+必須カラム欠落時はアクション誘導付きエラーで停止、
+オプショナルカラム欠落時は警告付きで処理継続。
 
 Usage:
     python3 obc_to_freee.py \
@@ -96,6 +101,61 @@ CAT_DATE_FORMAT = "CAT_DATE_FORMAT"
 CAT_COLUMN_COUNT = "CAT_COLUMN_COUNT"
 
 OBC_EXPECTED_COLS = 79
+
+# ---------------------------------------------------------------------------
+# 奉行 CSV カラム名定数
+# ---------------------------------------------------------------------------
+
+OBC_COL_DATE = "日付"
+OBC_COL_SLIP_NO = "伝票No."
+OBC_COL_DR_DEPT = "借方部門名"
+OBC_COL_DR_KAMOKU = "借方勘定科目名"
+OBC_COL_DR_HOJO = "借方補助科目名"
+OBC_COL_DR_TAX_LABEL = "借方税区分略称"
+OBC_COL_DR_TAX_RATE = "借方税率"
+OBC_COL_DR_PARTNER_CODE = "借方取引先コード"
+OBC_COL_DR_PARTNER = "借方取引先名"
+OBC_COL_DR_AMOUNT = "借方本体金額"
+OBC_COL_DR_TAX_AMOUNT = "借方消費税額"
+OBC_COL_CR_DEPT = "貸方部門名"
+OBC_COL_CR_KAMOKU = "貸方勘定科目名"
+OBC_COL_CR_HOJO = "貸方補助科目名"
+OBC_COL_CR_TAX_LABEL = "貸方税区分略称"
+OBC_COL_CR_TAX_RATE = "貸方税率"
+OBC_COL_CR_PARTNER_CODE = "貸方取引先コード"
+OBC_COL_CR_PARTNER = "貸方取引先名"
+OBC_COL_CR_AMOUNT = "貸方本体金額"
+OBC_COL_CR_TAX_AMOUNT = "貸方消費税額"
+OBC_COL_SUMMARY = "摘要"
+
+# 必須カラム: これが無いと変換不能
+REQUIRED_COLS = [
+    OBC_COL_DATE,
+    OBC_COL_SLIP_NO,
+    OBC_COL_DR_KAMOKU,
+    OBC_COL_DR_AMOUNT,
+    OBC_COL_CR_KAMOKU,
+    OBC_COL_CR_AMOUNT,
+]
+
+# オプショナルカラム: 無くても空文字で処理継続
+OPTIONAL_COLS = [
+    OBC_COL_DR_DEPT,
+    OBC_COL_DR_HOJO,
+    OBC_COL_DR_TAX_LABEL,
+    OBC_COL_DR_TAX_RATE,
+    OBC_COL_DR_PARTNER_CODE,
+    OBC_COL_DR_PARTNER,
+    OBC_COL_DR_TAX_AMOUNT,
+    OBC_COL_CR_DEPT,
+    OBC_COL_CR_HOJO,
+    OBC_COL_CR_TAX_LABEL,
+    OBC_COL_CR_TAX_RATE,
+    OBC_COL_CR_PARTNER_CODE,
+    OBC_COL_CR_PARTNER,
+    OBC_COL_CR_TAX_AMOUNT,
+    OBC_COL_SUMMARY,
+]
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +429,64 @@ _current_file = ""
 
 
 # ---------------------------------------------------------------------------
+# エンコーディング自動判定
+# ---------------------------------------------------------------------------
+
+def detect_encoding(filepath: str) -> str:
+    """ファイル先頭バイトとデコード試行で奉行 CSV のエンコーディングを判定。
+
+    注意: マルチバイト文字の境界でぶつ切れになるとデコード失敗が誤判定になるため、
+    ファイル全体を読んで検証する。
+    """
+    with open(filepath, 'rb') as f:
+        raw = f.read()
+
+    # BOM 判定
+    if raw.startswith(b'\xef\xbb\xbf'):
+        return 'utf-8-sig'
+    if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
+        return 'utf-16'
+
+    # UTF-8 (BOM なし) を試す → 失敗したら CP932
+    try:
+        raw.decode('utf-8', errors='strict')
+        return 'utf-8'
+    except UnicodeDecodeError:
+        try:
+            raw.decode('cp932', errors='strict')
+            return 'cp932'
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"ファイル {filepath} のエンコーディングを判定できませんでした。"
+                "CP932 / UTF-8 / UTF-8 BOM のいずれかで保存し直してください。"
+            )
+
+
+# ---------------------------------------------------------------------------
+# ヘッダーインデックス辞書
+# ---------------------------------------------------------------------------
+
+def build_header_index(header_row: list) -> dict:
+    """ヘッダー名 → カラムインデックスの辞書を作成。空白除去 + BOM 除去で正規化。"""
+    idx = {}
+    for i, name in enumerate(header_row):
+        normalized = name.strip().lstrip('﻿').strip()
+        if normalized:
+            idx[normalized] = i
+    return idx
+
+
+def get_col(row: list, header_idx: dict, name: str, default: str = "") -> str:
+    """カラム名で値を取得。カラムが存在しない・行が短い場合は default を返す。"""
+    if name not in header_idx:
+        return default
+    i = header_idx[name]
+    if i >= len(row):
+        return default
+    return row[i]
+
+
+# ---------------------------------------------------------------------------
 # ユーティリティ
 # ---------------------------------------------------------------------------
 
@@ -460,54 +578,52 @@ def parse_amount(val: str, col_name: str,
 # 奉行1行 → freee33列辞書に変換
 # ---------------------------------------------------------------------------
 
-def obc_row_to_freee(row: list, line_no: int) -> dict:
+def obc_row_to_freee(row: list, header_idx: dict, line_no: int) -> dict:
     """
-    奉行79列の1行をfreee33列の辞書に変換する。
+    奉行1行をfreee33列の辞書に変換する。
     Transformation 2 (普通預金→補助科目置換) を適用。
-    列番号は1-indexed仕様書に合わせて0-indexed変数を使用。
+    カラムはヘッダー名で参照するため列順序不問。
     """
-    def col(i: int) -> str:
-        """1-indexedの列番号を0-indexedで取得。"""
-        idx = i - 1
-        return row[idx] if idx < len(row) else ""
+    def gcol(name: str) -> str:
+        return get_col(row, header_idx, name)
 
-    slip_no = normalize_cell(col(12))
-    date = normalize_cell(col(11))
+    slip_no = normalize_cell(gcol(OBC_COL_SLIP_NO))
+    date = normalize_cell(gcol(OBC_COL_DATE))
 
     # --- 借方 ---
-    dr_kamoku = normalize_cell(col(18))
-    dr_hojo = clean_auxiliary(col(20))
-    dr_partner = clean_partner_name(col(36))
-    dr_partner_code = clean_partner_code(col(35))
-    dr_bumon = clean_bumon(col(16))
-    dr_amount = parse_amount(col(39), f"借方本体金額(col39)",
+    dr_kamoku = normalize_cell(gcol(OBC_COL_DR_KAMOKU))
+    dr_hojo = clean_auxiliary(gcol(OBC_COL_DR_HOJO))
+    dr_partner = clean_partner_name(gcol(OBC_COL_DR_PARTNER))
+    dr_partner_code = clean_partner_code(gcol(OBC_COL_DR_PARTNER_CODE))
+    dr_bumon = clean_bumon(gcol(OBC_COL_DR_DEPT))
+    dr_amount = parse_amount(gcol(OBC_COL_DR_AMOUNT), OBC_COL_DR_AMOUNT,
                              line_no=line_no, slip_no=slip_no, date=date)
-    dr_tax_label = normalize_cell(col(22))
-    dr_tax_rate = normalize_cell(col(25))
-    dr_tax_amount = parse_amount(col(40), f"借方消費税額(col40)",
+    dr_tax_label = normalize_cell(gcol(OBC_COL_DR_TAX_LABEL))
+    dr_tax_rate = normalize_cell(gcol(OBC_COL_DR_TAX_RATE))
+    dr_tax_amount = parse_amount(gcol(OBC_COL_DR_TAX_AMOUNT), OBC_COL_DR_TAX_AMOUNT,
                                  line_no=line_no, slip_no=slip_no, date=date)
     dr_tax_code = map_tax(dr_tax_label, dr_tax_rate,
                           context=f"借方 line={line_no}, 伝票No={slip_no}",
                           line_no=line_no, slip_no=slip_no, date=date, side="借方")
 
     # --- 貸方 ---
-    cr_kamoku = normalize_cell(col(44))
-    cr_hojo = clean_auxiliary(col(46))
-    cr_partner = clean_partner_name(col(62))
-    cr_partner_code = clean_partner_code(col(61))
-    cr_bumon = clean_bumon(col(42))
-    cr_amount = parse_amount(col(65), f"貸方本体金額(col65)",
+    cr_kamoku = normalize_cell(gcol(OBC_COL_CR_KAMOKU))
+    cr_hojo = clean_auxiliary(gcol(OBC_COL_CR_HOJO))
+    cr_partner = clean_partner_name(gcol(OBC_COL_CR_PARTNER))
+    cr_partner_code = clean_partner_code(gcol(OBC_COL_CR_PARTNER_CODE))
+    cr_bumon = clean_bumon(gcol(OBC_COL_CR_DEPT))
+    cr_amount = parse_amount(gcol(OBC_COL_CR_AMOUNT), OBC_COL_CR_AMOUNT,
                              line_no=line_no, slip_no=slip_no, date=date)
-    cr_tax_label = normalize_cell(col(48))
-    cr_tax_rate = normalize_cell(col(51))
-    cr_tax_amount = parse_amount(col(66), f"貸方消費税額(col66)",
+    cr_tax_label = normalize_cell(gcol(OBC_COL_CR_TAX_LABEL))
+    cr_tax_rate = normalize_cell(gcol(OBC_COL_CR_TAX_RATE))
+    cr_tax_amount = parse_amount(gcol(OBC_COL_CR_TAX_AMOUNT), OBC_COL_CR_TAX_AMOUNT,
                                  line_no=line_no, slip_no=slip_no, date=date)
     cr_tax_code = map_tax(cr_tax_label, cr_tax_rate,
                           context=f"貸方 line={line_no}, 伝票No={slip_no}",
                           line_no=line_no, slip_no=slip_no, date=date, side="貸方")
 
     # --- 摘要 ---
-    summary = normalize_cell(col(67))
+    summary = normalize_cell(gcol(OBC_COL_SUMMARY))
 
     # --- Transformation 2: 普通預金→補助科目置換 ---
     if dr_kamoku == "普通預金" and dr_hojo:
@@ -695,53 +811,85 @@ def to_freee_row(r: dict) -> list:
 _DATE_PATTERN = re.compile(r"^\d{4}/\d{2}/\d{2}$")
 
 
-def read_obc_csv(filepath: str, date_from=None, date_to=None) -> list:
+def read_obc_csv(filepath: str, date_from=None, date_to=None,
+                 encoding: str = "auto") -> dict:
     """
-    奉行CP932 CSVを読み込み、freee行辞書のリストを返す。
+    奉行 CSV を読み込み、freee 行辞書のリストを返す。
     date_from/date_to が指定されている場合、期間外の伝票を除外する。
     戻り値は OrderedDict 形式: {slip_key: [行辞書, ...], ...}
+
+    encoding: "auto" の場合は detect_encoding() で自動判定、
+              それ以外は指定値を直接使用。
     """
     global _current_file
     _current_file = filepath
 
+    # エンコーディング決定
+    if encoding == "auto":
+        enc = detect_encoding(filepath)
+        print(f"  エンコーディング自動判定: {enc}", file=sys.stderr)
+    else:
+        enc = encoding
+
     groups = OrderedDict()
 
-    with open(filepath, encoding="cp932", errors="replace") as f:
+    with open(filepath, encoding=enc, errors="replace") as f:
         reader = csv.reader(f)
         try:
-            header = next(reader)
+            header_row = next(reader)
         except StopIteration:
             return groups
+
+        # ヘッダーインデックス構築
+        header_idx = build_header_index(header_row)
+
+        # 必須カラム存在チェック (フェイルファースト)
+        missing = [c for c in REQUIRED_COLS if c not in header_idx]
+        if missing:
+            sep = "=" * 70
+            print(sep, file=sys.stderr)
+            print(f"[エラー] 必須カラムが見つかりません: {filepath}", file=sys.stderr)
+            print(sep, file=sys.stderr)
+            print("以下のカラムが奉行 CSV のヘッダー行に見つかりませんでした:", file=sys.stderr)
+            for c in missing:
+                print(f"  - {c}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("検出されたヘッダー:", file=sys.stderr)
+            for h in header_row:
+                print(f"    {repr(h)}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("【ネクストアクション】", file=sys.stderr)
+            print("  1. 奉行のエクスポート設定を確認し、上記カラムを含む形式でエクスポートし直す", file=sys.stderr)
+            print("  2. もしくは奉行 CSV のヘッダー行を手動で修正し、必須カラム名を統一する", file=sys.stderr)
+            print("     カラム名のスペル例: 「借方勘定科目名」「借方本体金額」 (全角)", file=sys.stderr)
+            print(sep, file=sys.stderr)
+            sys.exit(1)
+
+        # オプショナルカラム欠落警告
+        optional_missing = [c for c in OPTIONAL_COLS if c not in header_idx]
+        if optional_missing:
+            print(f"[注意] 以下のオプショナルカラムは奉行 CSV に存在しないため、"
+                  "freee 側で空欄になります:", file=sys.stderr)
+            for c in optional_missing:
+                print(f"  - {c}", file=sys.stderr)
+            # 税区分関連が欠落していれば追加通知
+            tax_cols = [OBC_COL_DR_TAX_LABEL, OBC_COL_DR_TAX_RATE,
+                        OBC_COL_CR_TAX_LABEL, OBC_COL_CR_TAX_RATE]
+            if any(c in optional_missing for c in tax_cols):
+                print("  ※ 税区分関連カラムが見つからないため、税区分は「対象外」固定で変換します。",
+                      file=sys.stderr)
 
         for line_no, row in enumerate(reader, start=2):
             if not row:
                 continue
 
-            # 列数チェック (想定: OBC_EXPECTED_COLS=79)
-            if len(row) != OBC_EXPECTED_COLS:
-                if len(row) < 67:
-                    # 最低限の処理に必要な列もないためスキップ
-                    _errors.add_column_count(
-                        filename=filepath,
-                        line_no=line_no,
-                        actual_cols=len(row),
-                    )
-                    continue
-                else:
-                    # 処理は継続するがエラーとして記録
-                    _errors.add_column_count(
-                        filename=filepath,
-                        line_no=line_no,
-                        actual_cols=len(row),
-                    )
-
-            # 日付 (col11, 0-index=10)
-            date_str = row[10].strip()
+            # 日付取得 (ヘッダー名で参照)
+            date_str = get_col(row, header_idx, OBC_COL_DATE).strip()
             if not date_str:
                 continue
 
             # 日付フォーマットチェック
-            slip_no_raw = row[11].strip() if len(row) > 11 else ""
+            slip_no_raw = get_col(row, header_idx, OBC_COL_SLIP_NO).strip()
             if not _DATE_PATTERN.match(date_str):
                 _errors.add_date_format(
                     filename=filepath,
@@ -762,7 +910,7 @@ def read_obc_csv(filepath: str, date_from=None, date_to=None) -> list:
                     pass  # 日付パース失敗はスキップせず変換を続ける
 
             # 変換
-            d = obc_row_to_freee(row, line_no)
+            d = obc_row_to_freee(row, header_idx, line_no)
 
             # グループキー: (日付, 伝票No)
             key = (d["date"], d["slip_no"])
@@ -933,14 +1081,16 @@ def write_output(
 # 奉行原本監査 (stderr 出力)
 # ---------------------------------------------------------------------------
 
-def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: bool = False):
+def audit_obc_source(input_files: list, date_from=None, date_to=None,
+                     quiet: bool = False, encoding: str = "auto"):
     """
     奉行原本 CSV を直接走査して以下の2種を stderr に出力する。
-      A: 伝票単位の借貸不一致 (col39=借方本体金額, col65=貸方本体金額)
-      B: 課売上 + マイナス金額の返品疑い行 (col22=借方税区分略称, col48=貸方税区分略称)
+      A: 伝票単位の借貸不一致 (借方本体金額, 貸方本体金額 カラムで集計)
+      B: 課売上 + マイナス金額の返品疑い行 (借方/貸方税区分略称 カラムで判定)
 
     date_from/date_to の期間外伝票は除外 (変換対象と同一範囲のみ警告)。
     quiet=True の場合は何も出力しない。
+    encoding: "auto" の場合は detect_encoding() で自動判定。
     """
     if quiet:
         return
@@ -956,18 +1106,25 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: boo
 
     for fpath in input_files:
         try:
-            with open(fpath, encoding="cp932", errors="replace") as f:
+            if encoding == "auto":
+                enc = detect_encoding(fpath)
+            else:
+                enc = encoding
+
+            with open(fpath, encoding=enc, errors="replace") as f:
                 reader = csv.reader(f)
                 try:
-                    next(reader)  # ヘッダースキップ
+                    header_row = next(reader)
                 except StopIteration:
                     continue
 
+                header_idx = build_header_index(header_row)
+
                 for row in reader:
-                    if not row or len(row) < 67:
+                    if not row:
                         continue
 
-                    date_str = row[10].strip()  # col11 (0-index=10)
+                    date_str = get_col(row, header_idx, OBC_COL_DATE).strip()
                     if not date_str:
                         continue
 
@@ -982,12 +1139,12 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: boo
                         except ValueError:
                             pass
 
-                    slip_no = row[11].strip()  # col12 (0-index=11)
+                    slip_no = get_col(row, header_idx, OBC_COL_SLIP_NO).strip()
                     slip_key = (date_str, slip_no)
 
                     # --- A: 借貸金額集計 ---
-                    dr_val = row[38].strip()  # col39 借方本体金額 (0-index=38)
-                    cr_val = row[64].strip()  # col65 貸方本体金額 (0-index=64)
+                    dr_val = get_col(row, header_idx, OBC_COL_DR_AMOUNT).strip()
+                    cr_val = get_col(row, header_idx, OBC_COL_CR_AMOUNT).strip()
                     try:
                         slip_dr[slip_key] += int(dr_val) if dr_val else 0
                     except ValueError:
@@ -999,10 +1156,10 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: boo
                     slip_date[slip_key] = date_str
 
                     # --- B: 課売上 + マイナス ---
-                    summary = row[66].strip() if len(row) > 66 else ""  # col67 摘要
+                    summary = get_col(row, header_idx, OBC_COL_SUMMARY).strip()
 
-                    # 借方側: col22=借方税区分略称 (0-index=21), col39=借方本体金額 (0-index=38)
-                    dr_tax_label = row[21].strip()
+                    # 借方側
+                    dr_tax_label = get_col(row, header_idx, OBC_COL_DR_TAX_LABEL).strip()
                     if dr_tax_label == "課売上":
                         try:
                             dr_amount_int = int(dr_val) if dr_val else 0
@@ -1011,8 +1168,8 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: boo
                         except ValueError:
                             pass
 
-                    # 貸方側: col48=貸方税区分略称 (0-index=47), col65=貸方本体金額 (0-index=64)
-                    cr_tax_label = row[47].strip()
+                    # 貸方側
+                    cr_tax_label = get_col(row, header_idx, OBC_COL_CR_TAX_LABEL).strip()
                     if cr_tax_label == "課売上":
                         try:
                             cr_amount_int = int(cr_val) if cr_val else 0
@@ -1086,7 +1243,7 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None, quiet: boo
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="奉行CP932 CSV → freee 33列 UTF-8 BOM CSV 変換")
+    parser = argparse.ArgumentParser(description="奉行 CSV → freee 33列 UTF-8 BOM CSV 変換")
     parser.add_argument("--input", nargs="+", required=True, help="奉行CSVファイルパス (複数可)")
     parser.add_argument("--output-dir", required=True, help="出力先ディレクトリ")
     parser.add_argument("--output-prefix", default="freee用_仕訳データ_obc変換", help="出力ファイル名プレフィックス")
@@ -1094,6 +1251,12 @@ def main():
     parser.add_argument("--from", dest="date_from", default=None, help="開始日 YYYY/MM/DD (両端含む)")
     parser.add_argument("--to", dest="date_to", default=None, help="終了日 YYYY/MM/DD (両端含む)")
     parser.add_argument("--quiet-audit", action="store_true", help="監査ログ (stderr) を抑制する")
+    parser.add_argument(
+        "--encoding",
+        choices=["auto", "cp932", "utf-8", "utf-8-sig"],
+        default="auto",
+        help="奉行 CSV のエンコーディング (デフォルト: 自動判定)",
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -1109,7 +1272,7 @@ def main():
     total_input = 0
     for fpath in args.input:
         print(f"読み込み: {fpath}")
-        groups = read_obc_csv(fpath, date_from, date_to)
+        groups = read_obc_csv(fpath, date_from, date_to, encoding=args.encoding)
         for key, rows in groups.items():
             if key not in all_groups:
                 all_groups[key] = []
@@ -1143,7 +1306,8 @@ def main():
         print(f"  {path}  ({count} データ行 + 1 ヘッダー行)")
 
     # 奉行原本監査ログ (stderr)
-    audit_obc_source(args.input, date_from, date_to, quiet=args.quiet_audit)
+    audit_obc_source(args.input, date_from, date_to,
+                     quiet=args.quiet_audit, encoding=args.encoding)
 
     # エラーレポート (stderr)
     _errors.print_report(
