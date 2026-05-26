@@ -391,7 +391,7 @@ freee 取り込み後の消費税申告で「課税売上 − 返還等」(freee
 
 - **進捗ログのみ保存:** `> 進捗.log`
 - **診断・監査ログのみ保存:** `2> 診断.log`
-- **両方を同じファイルへ:** `> all.log 2>&1` (Mac/Linux) または `> all.log 2>&1` (Windows PowerShell/cmd)
+- **両方を同じファイルへ:** `> all.log 2>&1` (Mac/Linux / Windows PowerShell / Windows cmd いずれも同じ構文で動作)
 - **進捗と診断を別ファイルへ:** `> 進捗.log 2> 診断.log`
 
 例 (Mac/Linux):
