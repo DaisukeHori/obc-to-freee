@@ -1246,8 +1246,10 @@ def main():
     print(f"出力行数: {len(all_rows)}")
 
     # 伝票単位借貸整合性チェック (ファイル書き出し前)
+    # 未知の不一致は check_slip_balance 内で _errors.add_balance() に追加される。
+    # 終了コード判定は後段の _errors.has_critical() で一元管理するため、戻り値は受けない。
     print()
-    balance_ok = check_slip_balance(all_rows, label=args.output_prefix)
+    check_slip_balance(all_rows, label=args.output_prefix)
     print()
 
     # 出力 (balance NG でも出力はスキップせず、サマリで警告)
