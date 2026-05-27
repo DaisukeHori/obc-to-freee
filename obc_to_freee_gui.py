@@ -734,8 +734,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "uploadToken が必要です"})
                 return
 
-            # メタデータ読み込み
-            upload_dir = UPLOADS_DIR / upload_token
+            # メタデータ読み込み (パストラバーサル対策: upload_token が UPLOADS_DIR 配下にあるか検証)
+            upload_dir = (UPLOADS_DIR / upload_token).resolve()
+            try:
+                upload_dir.relative_to(UPLOADS_DIR.resolve())
+            except ValueError:
+                self._send_json({"success": False, "error": f"不正な uploadToken です"})
+                return
             meta_path = upload_dir / "_meta.json"
             if not meta_path.exists():
                 self._send_json({"success": False, "error": f"トークン '{upload_token}' が見つかりません"})
