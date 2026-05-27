@@ -1,0 +1,1784 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>奉行→freee 仕訳変換ツール</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --blue: #2563eb; --blue-light: #dbeafe; --blue-dark: #1d4ed8;
+    --green: #16a34a; --green-light: #dcfce7;
+    --red: #dc2626; --red-light: #fee2e2;
+    --orange: #ea580c; --orange-light: #ffedd5;
+    --gray-50: #f9fafb; --gray-100: #f3f4f6; --gray-200: #e5e7eb;
+    --gray-300: #d1d5db; --gray-400: #9ca3af; --gray-500: #6b7280;
+    --gray-700: #374151; --gray-900: #111827;
+    --radius: 8px; --shadow: 0 1px 3px rgba(0,0,0,0.1);
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--gray-50); color: var(--gray-900); font-size: 14px; line-height: 1.5; }
+  a { color: var(--blue); }
+
+  /* Layout */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar { width: 200px; background: white; border-right: 1px solid var(--gray-200);
+    padding: 20px 0; position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; overflow-y: auto; }
+  .sidebar-logo { padding: 0 16px 20px; font-size: 13px; font-weight: 700; color: var(--blue);
+    border-bottom: 1px solid var(--gray-200); margin-bottom: 8px; }
+  .sidebar-logo span { display: block; font-size: 10px; font-weight: 400; color: var(--gray-500); margin-top: 2px; }
+  .sidebar-nav button { display: block; width: 100%; text-align: left;
+    padding: 10px 16px; border: none; background: none; cursor: pointer;
+    font-size: 13px; color: var(--gray-700); transition: background 0.1s; }
+  .sidebar-nav button:hover { background: var(--gray-100); }
+  .sidebar-nav button.active { background: var(--blue-light); color: var(--blue); font-weight: 600; }
+  .main { margin-left: 200px; padding: 24px; max-width: 1200px; }
+
+  /* Cards */
+  .card { background: white; border: 1px solid var(--gray-200); border-radius: var(--radius);
+    padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: var(--gray-900); }
+
+  /* Page sections */
+  .page { display: none; animation: fadeIn 0.2s ease; }
+  .page.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Step indicator */
+  .steps { display: flex; gap: 0; margin-bottom: 24px; }
+  .step { flex: 1; padding: 10px 16px; background: var(--gray-100); text-align: center;
+    font-size: 12px; font-weight: 600; color: var(--gray-500); border-right: 2px solid white; cursor: default; }
+  .step:last-child { border-right: none; }
+  .step.active { background: var(--blue); color: white; }
+  .step.done { background: var(--green-light); color: var(--green); }
+
+  /* Drop zone */
+  .drop-zone { border: 2px dashed var(--gray-300); border-radius: var(--radius);
+    padding: 48px 24px; text-align: center; cursor: pointer; transition: all 0.2s; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--blue); background: var(--blue-light); }
+  .drop-zone-icon { font-size: 40px; margin-bottom: 8px; }
+  .drop-zone-text { font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+  .drop-zone-sub { font-size: 12px; color: var(--gray-500); }
+  #file-input { display: none; }
+
+  /* File list */
+  .file-list { margin-top: 12px; }
+  .file-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: 6px; margin-bottom: 6px; }
+  .file-item-icon { color: var(--gray-400); }
+  .file-item-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-item-size { font-size: 11px; color: var(--gray-500); white-space: nowrap; }
+  .file-item-remove { border: none; background: none; cursor: pointer; color: var(--gray-400);
+    font-size: 16px; line-height: 1; padding: 2px 4px; }
+  .file-item-remove:hover { color: var(--red); }
+
+  /* Form elements */
+  .form-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  .form-group { flex: 1; min-width: 200px; }
+  .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--gray-700);
+    margin-bottom: 4px; }
+  .form-group input[type="text"], .form-group input[type="number"],
+  .form-group input[type="date"], .form-group select {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--gray-300); border-radius: 6px;
+    font-size: 13px; background: white; }
+  .form-group input:focus, .form-group select:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+  .checkbox-row label { font-size: 13px; cursor: pointer; }
+  .partner-options { padding: 16px; background: var(--blue-light); border-radius: 6px; margin-top: 8px; }
+
+  /* Buttons */
+  .btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 13px;
+    font-weight: 600; cursor: pointer; transition: all 0.15s; display: inline-flex;
+    align-items: center; gap: 6px; }
+  .btn-primary { background: var(--blue); color: white; }
+  .btn-primary:hover { background: var(--blue-dark); }
+  .btn-primary:disabled { background: var(--gray-300); cursor: not-allowed; }
+  .btn-secondary { background: white; color: var(--gray-700); border: 1px solid var(--gray-300); }
+  .btn-secondary:hover { background: var(--gray-50); }
+  .btn-success { background: var(--green); color: white; }
+  .btn-success:hover { background: #15803d; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+  .btn-danger { background: var(--red); color: white; }
+
+  /* Progress */
+  .progress-wrap { margin: 12px 0; }
+  .progress-bar-outer { height: 6px; background: var(--gray-200); border-radius: 3px; overflow: hidden; }
+  .progress-bar-inner { height: 100%; background: var(--blue); transition: width 0.3s; }
+  .progress-text { font-size: 12px; color: var(--gray-500); margin-top: 4px; }
+
+  /* Summary cards */
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .summary-card { background: white; border: 1px solid var(--gray-200); border-radius: var(--radius);
+    padding: 16px; text-align: center; }
+  .summary-card-num { font-size: 28px; font-weight: 700; color: var(--blue); }
+  .summary-card-label { font-size: 12px; color: var(--gray-500); margin-top: 2px; }
+  .summary-card.warn { border-color: var(--orange); }
+  .summary-card.warn .summary-card-num { color: var(--orange); }
+  .summary-card.ok .summary-card-num { color: var(--green); }
+
+  /* File result list */
+  .result-file-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border: 1px solid var(--gray-200); border-radius: 6px; margin-bottom: 8px; }
+  .result-file-type { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .type-journal { background: var(--blue-light); color: var(--blue); }
+  .type-partner { background: var(--green-light); color: var(--green); }
+  .result-file-name { flex: 1; font-size: 13px; font-weight: 500; }
+  .result-file-meta { font-size: 11px; color: var(--gray-500); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--gray-200); margin-bottom: 0; overflow-x: auto; }
+  .tab { padding: 8px 14px; font-size: 12px; font-weight: 600; border: none; background: none;
+    cursor: pointer; color: var(--gray-500); border-bottom: 2px solid transparent;
+    margin-bottom: -2px; white-space: nowrap; }
+  .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Table */
+  .table-wrap { overflow: auto; max-height: 500px; border: 1px solid var(--gray-200); border-radius: 0 0 var(--radius) var(--radius); }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .data-table th { background: var(--gray-100); padding: 7px 10px; text-align: left;
+    border-bottom: 2px solid var(--gray-200); position: sticky; top: 0; cursor: pointer;
+    white-space: nowrap; user-select: none; }
+  .data-table th:hover { background: var(--gray-200); }
+  .data-table th.sort-asc::after { content: " ↑"; }
+  .data-table th.sort-desc::after { content: " ↓"; }
+  .data-table td { padding: 5px 10px; border-bottom: 1px solid var(--gray-100); white-space: nowrap; }
+  .data-table tr:hover td { background: var(--gray-50); }
+  .highlight { background: #fef08a; border-radius: 2px; }
+  .table-controls { display: flex; gap: 8px; align-items: center; padding: 10px;
+    background: var(--gray-50); border: 1px solid var(--gray-200); border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0; flex-wrap: wrap; }
+  .table-search { flex: 1; min-width: 200px; padding: 6px 10px; border: 1px solid var(--gray-300);
+    border-radius: 6px; font-size: 12px; }
+  .table-search:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  .table-info { font-size: 11px; color: var(--gray-500); }
+  .pagination { display: flex; gap: 4px; align-items: center; font-size: 12px; }
+  .page-btn { padding: 4px 8px; border: 1px solid var(--gray-300); border-radius: 4px;
+    background: white; cursor: pointer; font-size: 12px; }
+  .page-btn:hover { background: var(--gray-100); }
+  .page-btn.active { background: var(--blue); color: white; border-color: var(--blue); }
+  .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* Audit sections */
+  .audit-section { margin-bottom: 8px; border: 1px solid var(--gray-200); border-radius: var(--radius); overflow: hidden; }
+  .audit-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    background: var(--gray-50); cursor: pointer; user-select: none; }
+  .audit-header:hover { background: var(--gray-100); }
+  .audit-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+  .badge-warn { background: var(--orange-light); color: var(--orange); }
+  .badge-ok { background: var(--green-light); color: var(--green); }
+  .badge-info { background: var(--blue-light); color: var(--blue); }
+  .audit-title { flex: 1; font-size: 13px; font-weight: 600; }
+  .audit-chevron { font-size: 12px; color: var(--gray-500); transition: transform 0.2s; }
+  .audit-body { padding: 12px 14px; border-top: 1px solid var(--gray-200); display: none; }
+  .audit-body.open { display: block; }
+  .audit-section.expanded .audit-chevron { transform: rotate(180deg); }
+  .audit-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .audit-table th { background: var(--gray-100); padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--gray-200); }
+  .audit-table td { padding: 4px 8px; border-bottom: 1px solid var(--gray-100); }
+
+  /* Modal */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 100; display: flex; align-items: center; justify-content: center;
+    animation: fadeIn 0.15s ease; }
+  .modal { background: white; border-radius: var(--radius); box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    width: 90%; max-width: 700px; max-height: 90vh; display: flex; flex-direction: column; }
+  .modal-header { padding: 16px 20px; border-bottom: 1px solid var(--gray-200);
+    display: flex; align-items: center; gap: 8px; }
+  .modal-title { flex: 1; font-size: 15px; font-weight: 700; }
+  .modal-body { padding: 20px; overflow-y: auto; }
+  .modal-footer { padding: 12px 20px; border-top: 1px solid var(--gray-200);
+    display: flex; gap: 8px; justify-content: flex-end; }
+  .dedup-card { border: 1px solid var(--gray-200); border-radius: 6px; padding: 14px; margin-bottom: 12px; }
+  .dedup-card-name { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+  .dedup-code-table { width: 100%; font-size: 12px; border-collapse: collapse; margin-bottom: 10px; }
+  .dedup-code-table th { background: var(--gray-100); padding: 4px 8px; text-align: left; }
+  .dedup-code-table td { padding: 4px 8px; border-bottom: 1px solid var(--gray-100); }
+  .radio-options { display: flex; flex-direction: column; gap: 4px; }
+  .radio-options label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; padding: 4px; border-radius: 4px; }
+  .radio-options label:hover { background: var(--gray-50); }
+
+  /* History */
+  .history-item { padding: 12px; border: 1px solid var(--gray-200); border-radius: 6px;
+    margin-bottom: 8px; display: flex; align-items: flex-start; gap: 12px; }
+  .history-meta { flex: 1; }
+  .history-time { font-size: 11px; color: var(--gray-500); }
+  .history-summary { font-size: 13px; font-weight: 500; margin-top: 2px; }
+  .history-detail { font-size: 11px; color: var(--gray-500); }
+
+  /* Alert */
+  .alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+  .alert-warn { background: var(--orange-light); border: 1px solid #fdba74; color: #9a3412; }
+  .alert-error { background: var(--red-light); border: 1px solid #fca5a5; color: #7f1d1d; }
+  .alert-info { background: var(--blue-light); border: 1px solid #93c5fd; color: #1e3a8a; }
+  .alert-success { background: var(--green-light); border: 1px solid #86efac; color: #14532d; }
+
+  /* Freee upload instructions */
+  .steps-list { counter-reset: step; padding: 0; list-style: none; }
+  .steps-list li { counter-increment: step; position: relative; padding: 10px 10px 10px 48px;
+    border-left: 2px solid var(--blue-light); margin-left: 14px; margin-bottom: 4px; font-size: 13px; }
+  .steps-list li::before { content: counter(step); position: absolute; left: -14px; top: 10px;
+    width: 26px; height: 26px; background: var(--blue); color: white; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+  .steps-list li:last-child { border-left: 2px solid transparent; }
+
+  /* Loading spinner */
+  .spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid var(--blue-light);
+    border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 16px; }
+    .form-row { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">奉行→freee変換<span>JavaScript版 v1.0</span></div>
+    <div class="sidebar-nav">
+      <button onclick="showPage('home')" id="nav-home" class="active">🏠 ホーム</button>
+      <button onclick="showPage('history')" id="nav-history">📋 ヒストリ</button>
+      <button onclick="showPage('settings')" id="nav-settings">⚙️ 設定</button>
+      <button onclick="showPage('howto')" id="nav-howto">📤 freee手順</button>
+      <button onclick="showPage('about')" id="nav-about">ℹ️ About</button>
+    </div>
+  </nav>
+
+  <!-- Main content -->
+  <main class="main">
+
+    <!-- Home page -->
+    <div class="page active" id="page-home">
+      <!-- Step indicator -->
+      <div class="steps" id="step-indicator">
+        <div class="step active" id="step-1">① ファイル選択</div>
+        <div class="step" id="step-2">② オプション</div>
+        <div class="step" id="step-3">③ 結果</div>
+      </div>
+
+      <!-- Step 1: File selection -->
+      <div id="section-step1">
+        <div class="card">
+          <div class="card-title">奉行CSVを選択</div>
+          <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+            <div class="drop-zone-icon">📂</div>
+            <div class="drop-zone-text">CSVファイルをドラッグ&amp;ドロップ</div>
+            <div class="drop-zone-sub">またはクリックしてファイルを選択（複数可）</div>
+          </div>
+          <input type="file" id="file-input" multiple accept=".csv">
+          <div class="file-list" id="file-list"></div>
+          <div style="margin-top:16px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn btn-primary" id="btn-to-step2" onclick="goToStep2()" disabled>次へ: オプション設定 →</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 2: Options -->
+      <div id="section-step2" style="display:none;">
+        <div class="card">
+          <div class="card-title">変換オプション</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>出力ファイル名プレフィックス</label>
+              <input type="text" id="opt-prefix" value="freee用_仕訳データ_obc変換">
+            </div>
+            <div class="form-group">
+              <label>1ファイル最大行数</label>
+              <input type="number" id="opt-rows-per-file" value="10000" min="100" max="99999">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>期間開始 (任意)</label>
+              <input type="date" id="opt-date-from">
+            </div>
+            <div class="form-group">
+              <label>期間終了 (任意)</label>
+              <input type="date" id="opt-date-to">
+            </div>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="opt-output-partners" onchange="togglePartnerOptions()">
+            <label for="opt-output-partners">取引先マスタCSVも生成する</label>
+          </div>
+          <div id="partner-options" class="partner-options" style="display:none;">
+            <div class="form-row">
+              <div class="form-group">
+                <label>取引先マスタ ファイル名プレフィックス</label>
+                <input type="text" id="opt-partners-prefix" value="freee取引先マスタ">
+              </div>
+              <div class="form-group">
+                <label>同名異コード対処戦略</label>
+                <select id="opt-dedup-strategy">
+                  <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
+                  <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
+                  <option value="warn-only">自動: 警告のみ</option>
+                  <option value="interactive">対話: 1件ずつ選ぶ</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:8px;">
+            <button class="btn btn-secondary" onclick="goToStep1()">← 戻る</button>
+            <button class="btn btn-primary" id="btn-execute" onclick="executeConversion()">変換実行</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3: Results -->
+      <div id="section-step3" style="display:none;">
+        <div id="result-content"></div>
+        <div style="margin-top:8px;">
+          <button class="btn btn-secondary" onclick="resetToStep1()">← 最初からやり直す</button>
+        </div>
+      </div>
+    </div><!-- /page-home -->
+
+    <!-- History page -->
+    <div class="page" id="page-history">
+      <div class="card">
+        <div class="card-title">変換ヒストリ</div>
+        <div id="history-list"></div>
+      </div>
+    </div>
+
+    <!-- Settings page -->
+    <div class="page" id="page-settings">
+      <div class="card">
+        <div class="card-title">設定</div>
+        <p style="font-size:13px; color:var(--gray-500); margin-bottom:16px;">設定はlocalStorageに自動保存されます。</p>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-danger btn-sm" onclick="clearStorage()">設定・ヒストリをリセット</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- How-to page -->
+    <div class="page" id="page-howto">
+      <div class="card">
+        <div class="card-title">freee アップロード手順</div>
+        <ol class="steps-list">
+          <li>freee にログインし、左メニューから <strong>「経費・振替 → 仕訳帳」</strong> を開く</li>
+          <li>右上の <strong>「インポート」</strong> ボタンをクリック</li>
+          <li><strong>「他社会計ソフトの仕訳データ」</strong> または <strong>「freee形式 CSVファイル」</strong> を選択</li>
+          <li>本ツールで生成した <code>freee用_仕訳データ_obc変換_001.csv</code> 等をアップロード</li>
+          <li>複数ファイルある場合は <strong>番号順に1ファイルずつ</strong> インポートする</li>
+          <li>プレビューで内容を確認し、問題なければ <strong>「インポート実行」</strong> をクリック</li>
+          <li>取引先マスタも生成した場合は、<strong>「取引先 → 取引先インポート」</strong> から <code>freee取引先マスタ.csv</code> をアップロード</li>
+          <li>インポート完了後、仕訳帳で件数・金額が正しいか確認する</li>
+        </ol>
+        <div class="alert alert-warn" style="margin-top:16px;">
+          <strong>注意:</strong> 監査ログに「要確認」項目がある場合は、freeeアップロード前に経理担当が内容を確認してください。
+        </div>
+      </div>
+    </div>
+
+    <!-- About page -->
+    <div class="page" id="page-about">
+      <div class="card">
+        <div class="card-title">About</div>
+        <p style="font-size:13px; margin-bottom:8px;">奉行（OBC勘定奉行）CSVをfreee仕訳インポート形式に変換するブラウザ完結ツールです。</p>
+        <ul style="font-size:13px; margin-left:20px; color:var(--gray-700);">
+          <li>Python不要・ローカルサーバー不要</li>
+          <li>HTMLファイルをダブルクリックするだけで動作</li>
+          <li>ネット接続不要・USBメモリでも動く</li>
+          <li>CP932 / UTF-8 / UTF-8 BOM / UTF-16 を自動判定</li>
+          <li>freee 33列拡張テンプレート、UTF-8 BOM出力</li>
+          <li>取引先マスタ 57列テンプレート対応</li>
+          <li>同名異コード対話的対処</li>
+          <li>借貸整合性チェック・監査ログ</li>
+        </ul>
+        <p style="font-size:11px; color:var(--gray-400); margin-top:16px;">Python版 obc_to_freee.py を完全移植。</p>
+      </div>
+    </div>
+
+  </main><!-- /main -->
+</div><!-- /app -->
+
+<!-- Dedup modal -->
+<div class="modal-overlay" id="dedup-modal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">同名異コード — 対処を選択してください</div>
+    </div>
+    <div class="modal-body" id="dedup-modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-sm" onclick="dedupAutoAll()">全件 自動推奨で決定</button>
+      <button class="btn btn-primary" onclick="dedupConfirm()">決定して変換実行</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ===========================================================================
+// 定数
+// ===========================================================================
+
+const FREEE_HEADER = [
+  "[表題行]","日付","伝票番号","決算整理仕訳",
+  "借方勘定科目","借方科目コード","借方補助科目","借方取引先","借方取引先コード",
+  "借方部門","借方品目","借方メモタグ","借方セグメント1","借方セグメント2","借方セグメント3",
+  "借方金額","借方税区分","借方税額",
+  "貸方勘定科目","貸方科目コード","貸方補助科目","貸方取引先","貸方取引先コード",
+  "貸方部門","貸方品目","貸方メモタグ","貸方セグメント1","貸方セグメント2","貸方セグメント3",
+  "貸方金額","貸方税区分","貸方税額",
+  "摘要"
+];
+
+const FREEE_PARTNER_HEADER = [
+  "名前（通称）","取引先コード","ショートカット1","ショートカット2",
+  "正式名称（帳票出力時に使用される名称）","カナ名称","敬称","事業所種別","地域",
+  "郵便番号","都道府県","市区町村・番地","建物名・部屋番号など","電話番号",
+  "営業担当者名","営業担当者メールアドレス","請求書送付方法","入力候補",
+  "銀行名","銀行名（カナ）","銀行番号","支店名","支店名（カナ）","支店番号",
+  "口座種別","口座番号","受取人名","受取人名（カナ）",
+  "締め日(支払期日設定)","支払月(支払期日設定)","支払日(支払期日設定)",
+  "締め日(入金期日設定)","入金月(入金期日設定)","入金日(入金期日設定)",
+  "手数料負担","振込元口座","適格請求書発行事業者（該当する/該当しない）",
+  "適格請求書発行事業者の登録番号","取引先担当者敬称","取引先担当者部署",
+  "顧客として利用する","見込顧客として利用する","請求先として利用する",
+  "入金元として利用する","仕入先として利用する","支払先として利用する",
+  "外税/内税","締め日(請求期日設定)","請求予定月(請求期日設定)","請求予定日(請求期日設定)",
+  "入金方法","振込手数料負担区分(請求)","支払方法","帳票共有ポータル",
+  "従業員として利用する","販売設定の送付先として利用する","調達設定の送付先として利用する"
+];
+
+const TAX_MAP = {
+  "課仕入|10": "課対仕入10%",
+  "課仕入|8":  "課対仕入8%（軽）",
+  "課仕入|0":  "対象外",
+  "課仕入|":   "対象外",
+  "課売上|10": "課税売上10%",
+  "課売上|8":  "課税売上8%（軽）",
+  "課売上|0":  "対象外",
+  "課売上|":   "対象外",
+  "共仕入|10": "共対仕入10%",
+  "共仕入|8":  "共対仕入8%（軽）",
+  "共仕入|0":  "対象外",
+  "共仕入|":   "対象外",
+  "課仕免|10": "課対仕入（控80）10%",
+  "課仕免|8":  "課対仕入（控80）8%（軽）",
+  "課仕免|0":  "対象外",
+  "課仕免|":   "対象外",
+  "共仕免|10": "共対仕入（控80）10%",
+  "共仕免|8":  "共対仕入（控80）8%（軽）",
+  "共仕免|0":  "対象外",
+  "共仕免|":   "対象外",
+  "課売返|10": "課税売返10%",
+  "課売返|8":  "課税売返8%（軽）",
+  "課売返|0":  "対象外",
+  "課売返|":   "対象外",
+  "非売上|10": "非課売上",
+  "非売上|8":  "非課売上",
+  "非売上|0":  "非課売上",
+  "非売上|":   "非課売上",
+  "非仕入|10": "非課仕入",
+  "非仕入|8":  "非課仕入",
+  "非仕入|0":  "非課仕入",
+  "非仕入|":   "非課仕入",
+  "対象外|":   "対象外",
+  "対象外|10": "対象外",
+  "対象外|8":  "対象外",
+  "対象外|0":  "対象外",
+  "|":         "対象外",
+  "|10":       "対象外",
+  "|8":        "対象外",
+  "|0":        "対象外"
+};
+
+const KNOWN_MISMATCH_SLIPS = new Set(["002193","002820","003305","003613","005192","005195"]);
+
+const OBC_COL_DATE = "日付";
+const OBC_COL_SLIP_NO = "伝票No.";
+const OBC_COL_DR_DEPT = "借方部門名";
+const OBC_COL_DR_KAMOKU = "借方勘定科目名";
+const OBC_COL_DR_HOJO = "借方補助科目名";
+const OBC_COL_DR_TAX_LABEL = "借方税区分略称";
+const OBC_COL_DR_TAX_RATE = "借方税率";
+const OBC_COL_DR_PARTNER_CODE = "借方取引先コード";
+const OBC_COL_DR_PARTNER = "借方取引先名";
+const OBC_COL_DR_AMOUNT = "借方本体金額";
+const OBC_COL_DR_TAX_AMOUNT = "借方消費税額";
+const OBC_COL_CR_DEPT = "貸方部門名";
+const OBC_COL_CR_KAMOKU = "貸方勘定科目名";
+const OBC_COL_CR_HOJO = "貸方補助科目名";
+const OBC_COL_CR_TAX_LABEL = "貸方税区分略称";
+const OBC_COL_CR_TAX_RATE = "貸方税率";
+const OBC_COL_CR_PARTNER_CODE = "貸方取引先コード";
+const OBC_COL_CR_PARTNER = "貸方取引先名";
+const OBC_COL_CR_AMOUNT = "貸方本体金額";
+const OBC_COL_CR_TAX_AMOUNT = "貸方消費税額";
+const OBC_COL_SUMMARY = "摘要";
+
+const REQUIRED_COLS = [OBC_COL_DATE, OBC_COL_SLIP_NO, OBC_COL_DR_KAMOKU, OBC_COL_DR_AMOUNT, OBC_COL_CR_KAMOKU, OBC_COL_CR_AMOUNT];
+
+// ===========================================================================
+// ユーティリティ
+// ===========================================================================
+
+function detectEncoding(uint8) {
+  if (uint8[0] === 0xEF && uint8[1] === 0xBB && uint8[2] === 0xBF) return 'utf-8'; // UTF-8 BOM
+  if (uint8[0] === 0xFF && uint8[1] === 0xFE) return 'utf-16le';
+  if (uint8[0] === 0xFE && uint8[1] === 0xFF) return 'utf-16be';
+  try {
+    new TextDecoder('utf-8', {fatal: true}).decode(uint8);
+    return 'utf-8';
+  } catch(e) {
+    return 'shift_jis';
+  }
+}
+
+async function readFileText(file) {
+  const buf = await file.arrayBuffer();
+  const uint8 = new Uint8Array(buf);
+  const enc = detectEncoding(uint8);
+  const text = new TextDecoder(enc, {fatal: false}).decode(uint8);
+  // UTF-8 BOM を除去
+  return text.startsWith('﻿') ? text.slice(1) : text;
+}
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuote) {
+      if (c === '"' && text[i+1] === '"') { cell += '"'; i++; }
+      else if (c === '"') { inQuote = false; }
+      else { cell += c; }
+    } else {
+      if (c === '"') { inQuote = true; }
+      else if (c === ',') { row.push(cell); cell = ''; }
+      else if (c === '\n' || c === '\r') {
+        if (c === '\r' && text[i+1] === '\n') i++;
+        row.push(cell); cell = '';
+        if (row.length > 1 || row[0] !== '') rows.push(row);
+        row = [];
+      } else { cell += c; }
+    }
+  }
+  if (cell !== '' || row.length > 0) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function serializeCSV(rows) {
+  return rows.map(row => row.map(cell => {
+    const s = String(cell == null ? '' : cell);
+    if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }).join(',')).join('\r\n');
+}
+
+function createCSVBlob(rows) {
+  const csv = serializeCSV(rows);
+  return new Blob(['﻿', csv], {type: 'text/csv;charset=utf-8'});
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  return (n/1048576).toFixed(1) + ' MB';
+}
+
+// ===========================================================================
+// 変換コア関数
+// ===========================================================================
+
+function buildHeaderIndex(headerRow) {
+  const idx = {};
+  headerRow.forEach((name, i) => {
+    const normalized = name.replace(/^﻿/, '').trim();
+    if (normalized) idx[normalized] = i;
+  });
+  return idx;
+}
+
+function getCol(row, headerIdx, name, def = '') {
+  if (!(name in headerIdx)) return def;
+  const i = headerIdx[name];
+  if (i >= row.length) return def;
+  return row[i] == null ? def : row[i];
+}
+
+function normalizeCell(v) {
+  return v.replace(/[\r\n]+/g, ' ').replace(/ +/g, ' ').trim();
+}
+
+function mapTax(label, rate, errors, ctx) {
+  const key = label.trim() + '|' + rate.trim();
+  if (key in TAX_MAP) return TAX_MAP[key];
+  // unknown
+  errors.tax.push({label: label.trim(), rate: rate.trim(), ctx});
+  return '対象外';
+}
+
+function cleanAuxiliary(v) { const s = normalizeCell(v); return s === 'その他' ? '' : s; }
+function cleanPartnerName(v) { const s = normalizeCell(v); return (s === 'その他取引先' || s === '') ? '' : s; }
+function cleanPartnerCode(v) { const s = normalizeCell(v); return (s === '000000' || s === '') ? '' : s; }
+function cleanBumon(v) { const s = normalizeCell(v); return s === 'その他' ? '' : s; }
+
+function parseAmount(v, colName, lineNo, slipNo, date, errors) {
+  const s = v.trim();
+  if (s === '') return '0';
+  if (!isNaN(Number(s))) return s;
+  errors.amount.push({lineNo, slipNo, date, colName, rawVal: v});
+  return '0';
+}
+
+function obcRowToFreee(row, headerIdx, lineNo, errors) {
+  const gc = (name) => getCol(row, headerIdx, name);
+  const slipNo = normalizeCell(gc(OBC_COL_SLIP_NO));
+  const date   = normalizeCell(gc(OBC_COL_DATE));
+
+  let drKamoku = normalizeCell(gc(OBC_COL_DR_KAMOKU));
+  let drHojo   = cleanAuxiliary(gc(OBC_COL_DR_HOJO));
+  const drPartner     = cleanPartnerName(gc(OBC_COL_DR_PARTNER));
+  const drPartnerCode = cleanPartnerCode(gc(OBC_COL_DR_PARTNER_CODE));
+  const drBumon       = cleanBumon(gc(OBC_COL_DR_DEPT));
+  const drAmount      = parseAmount(gc(OBC_COL_DR_AMOUNT), OBC_COL_DR_AMOUNT, lineNo, slipNo, date, errors);
+  const drTaxLabel    = normalizeCell(gc(OBC_COL_DR_TAX_LABEL));
+  const drTaxRate     = normalizeCell(gc(OBC_COL_DR_TAX_RATE));
+  const drTaxAmount   = parseAmount(gc(OBC_COL_DR_TAX_AMOUNT), OBC_COL_DR_TAX_AMOUNT, lineNo, slipNo, date, errors);
+  const drTaxCode     = mapTax(drTaxLabel, drTaxRate, errors, `借方 line=${lineNo} slip=${slipNo}`);
+
+  let crKamoku = normalizeCell(gc(OBC_COL_CR_KAMOKU));
+  let crHojo   = cleanAuxiliary(gc(OBC_COL_CR_HOJO));
+  const crPartner     = cleanPartnerName(gc(OBC_COL_CR_PARTNER));
+  const crPartnerCode = cleanPartnerCode(gc(OBC_COL_CR_PARTNER_CODE));
+  const crBumon       = cleanBumon(gc(OBC_COL_CR_DEPT));
+  const crAmount      = parseAmount(gc(OBC_COL_CR_AMOUNT), OBC_COL_CR_AMOUNT, lineNo, slipNo, date, errors);
+  const crTaxLabel    = normalizeCell(gc(OBC_COL_CR_TAX_LABEL));
+  const crTaxRate     = normalizeCell(gc(OBC_COL_CR_TAX_RATE));
+  const crTaxAmount   = parseAmount(gc(OBC_COL_CR_TAX_AMOUNT), OBC_COL_CR_TAX_AMOUNT, lineNo, slipNo, date, errors);
+  const crTaxCode     = mapTax(crTaxLabel, crTaxRate, errors, `貸方 line=${lineNo} slip=${slipNo}`);
+
+  const summary = normalizeCell(gc(OBC_COL_SUMMARY));
+
+  // Transformation 2: 普通預金→補助科目置換
+  if (drKamoku === '普通預金' && drHojo) { drKamoku = drHojo; drHojo = ''; }
+  if (crKamoku === '普通預金' && crHojo) { crKamoku = crHojo; crHojo = ''; }
+
+  return {date, slipNo, drKamoku, drHojo, drPartner, drPartnerCode, drBumon,
+    drAmount, drTaxCode, drTaxAmount, crKamoku, crHojo, crPartner, crPartnerCode,
+    crBumon, crAmount, crTaxCode, crTaxAmount, summary};
+}
+
+function applyFukugo(rowsBySlip, groupBumon) {
+  const result = [];
+  let skipped = 0;
+  for (const r of rowsBySlip) {
+    const debitActive  = (r.drKamoku !== '' && r.drAmount !== '0');
+    const creditActive = (r.crKamoku !== '' && r.crAmount !== '0');
+
+    if (debitActive && !creditActive) {
+      const bumon = r.drBumon || groupBumon;
+      const row = Object.assign({}, r);
+      row.crKamoku = '複合'; row.crHojo = ''; row.crBumon = bumon;
+      row.crTaxCode = '対象外'; row.crAmount = r.drAmount; row.crTaxAmount = '0';
+      row.crPartner = ''; row.crPartnerCode = '';
+      result.push(row);
+    } else if (creditActive && !debitActive) {
+      const bumon = r.crBumon || groupBumon;
+      const row = Object.assign({}, r);
+      row.drKamoku = '複合'; row.drHojo = ''; row.drBumon = bumon;
+      row.drTaxCode = '対象外'; row.drAmount = r.crAmount; row.drTaxAmount = '0';
+      row.drPartner = ''; row.drPartnerCode = '';
+      result.push(row);
+    } else if (debitActive && creditActive) {
+      const bumonForCr = r.drBumon || groupBumon;
+      const bumonForDr = r.crBumon || groupBumon;
+      // 行1: 借方明細
+      const drRow = Object.assign({}, r);
+      drRow.crKamoku = '複合'; drRow.crHojo = ''; drRow.crBumon = bumonForCr;
+      drRow.crTaxCode = '対象外'; drRow.crAmount = r.drAmount; drRow.crTaxAmount = '0';
+      drRow.crPartner = ''; drRow.crPartnerCode = '';
+      result.push(drRow);
+      // 行2: 貸方明細
+      const crRow = Object.assign({}, r);
+      crRow.drKamoku = '複合'; crRow.drHojo = ''; crRow.drBumon = bumonForDr;
+      crRow.drTaxCode = '対象外'; crRow.drAmount = r.crAmount; crRow.drTaxAmount = '0';
+      crRow.drPartner = ''; crRow.drPartnerCode = '';
+      result.push(crRow);
+    } else {
+      skipped++;
+    }
+  }
+  return {result, skipped};
+}
+
+function findGroupBumon(rows) {
+  for (const r of rows) { if (r.drBumon) return r.drBumon; }
+  for (const r of rows) { if (r.crBumon) return r.crBumon; }
+  return '';
+}
+
+function toFreeeRow(r, codeRewriteMap, nameOverrideMap) {
+  let drCode = r.drPartnerCode;
+  let crCode = r.crPartnerCode;
+  let drName = r.drPartner;
+  let crName = r.crPartner;
+  if (codeRewriteMap) {
+    if (drCode in codeRewriteMap) drCode = codeRewriteMap[drCode];
+    if (crCode in codeRewriteMap) crCode = codeRewriteMap[crCode];
+  }
+  if (nameOverrideMap) {
+    if (drCode in nameOverrideMap) drName = nameOverrideMap[drCode];
+    if (crCode in nameOverrideMap) crName = nameOverrideMap[crCode];
+  }
+  return [
+    '[明細行]', r.date, r.slipNo, '',
+    r.drKamoku, '', r.drHojo, drName, drCode,
+    r.drBumon, '', '', '', '', '',
+    r.drAmount, r.drTaxCode, r.drTaxAmount,
+    r.crKamoku, '', r.crHojo, crName, crCode,
+    r.crBumon, '', '', '', '', '',
+    r.crAmount, r.crTaxCode, r.crTaxAmount,
+    r.summary
+  ];
+}
+
+function processGroups(groups, codeRewriteMap, nameOverrideMap) {
+  const allRows = [];
+  const slipSizes = [];
+  let totalSkipped = 0;
+  for (const [key, slipRows] of groups) {
+    const groupBumon = findGroupBumon(slipRows);
+    const {result, skipped} = applyFukugo(slipRows, groupBumon);
+    totalSkipped += skipped;
+    const freeeRows = result.map(r => toFreeeRow(r, codeRewriteMap, nameOverrideMap));
+    allRows.push(...freeeRows);
+    slipSizes.push([key, freeeRows.length]);
+  }
+  return {allRows, slipSizes, totalSkipped};
+}
+
+function checkSlipBalance(allRows) {
+  const drMap = new Map();
+  const crMap = new Map();
+  for (const row of allRows) {
+    const key = row[1] + '|' + row[2]; // date|slipNo
+    drMap.set(key, (drMap.get(key)||0) + (parseInt(String(row[15])||'0', 10)||0));
+    crMap.set(key, (crMap.get(key)||0) + (parseInt(String(row[29])||'0', 10)||0));
+  }
+  const known = [], unknown = [];
+  for (const key of [...drMap.keys()].sort()) {
+    const dr = drMap.get(key), cr = crMap.get(key)||0;
+    if (dr !== cr) {
+      const [date, slipNo] = key.split('|');
+      if (KNOWN_MISMATCH_SLIPS.has(slipNo)) known.push({date, slipNo, dr, cr});
+      else unknown.push({date, slipNo, dr, cr});
+    }
+  }
+  return {known, unknown};
+}
+
+// 奉行原本監査
+function auditObcSource(allGroups, dateFrom, dateTo) {
+  const slipDr = new Map(), slipCr = new Map(), slipDate = new Map();
+  const minusKaubai = [];
+
+  for (const [key, rows] of allGroups) {
+    for (const r of rows) {
+      const dateStr = r.date;
+      if (dateFrom || dateTo) {
+        const d = parseDateStr(dateStr);
+        if (d) {
+          if (dateFrom && d < dateFrom) continue;
+          if (dateTo && d > dateTo) continue;
+        }
+      }
+      const slipKey = dateStr + '|' + r.slipNo;
+      slipDr.set(slipKey, (slipDr.get(slipKey)||0) + (parseInt(r.drAmount||'0')||0));
+      slipCr.set(slipKey, (slipCr.get(slipKey)||0) + (parseInt(r.crAmount||'0')||0));
+      slipDate.set(slipKey, dateStr);
+
+      // 課売上+マイナス (元データのtax labelを参照 — obcRowToFreeeより前の原データが必要)
+      // obcRowToFreeeの出力にはtaxLabelがないため、drTaxCodeで判定は不可
+      // ここでは変換後データから課税売上10%/8%の判定で代用
+      if ((r.drTaxCode === '課税売上10%' || r.drTaxCode === '課税売上8%（軽）') &&
+          parseInt(r.drAmount||'0') < 0) {
+        minusKaubai.push({slipNo: r.slipNo, date: dateStr, side: '借方', amount: parseInt(r.drAmount), summary: r.summary});
+      }
+      if ((r.crTaxCode === '課税売上10%' || r.crTaxCode === '課税売上8%（軽）') &&
+          parseInt(r.crAmount||'0') < 0) {
+        minusKaubai.push({slipNo: r.slipNo, date: dateStr, side: '貸方', amount: parseInt(r.crAmount), summary: r.summary});
+      }
+    }
+  }
+
+  const mismatches = [];
+  for (const k of [...slipDr.keys()].sort()) {
+    const dr = slipDr.get(k), cr = slipCr.get(k)||0;
+    if (dr !== cr) {
+      const [date, slipNo] = k.split('|');
+      mismatches.push({slipNo, date, dr, cr});
+    }
+  }
+  return {mismatches, minusKaubai};
+}
+
+function parseDateStr(s) {
+  if (!s) return null;
+  const m = s.match(/^(\d{4})\/(\d{2})\/(\d{2})$/);
+  if (!m) return null;
+  return new Date(parseInt(m[1]), parseInt(m[2])-1, parseInt(m[3]));
+}
+
+// ===========================================================================
+// 取引先収集・dedup
+// ===========================================================================
+
+function collectPartners(groups) {
+  const drMap = new Map(); // code -> Map<name, count>
+  const crMap = new Map();
+  let noiseCount = 0;
+
+  function addToMap(map, code, name) {
+    if (!map.has(code)) map.set(code, new Map());
+    const nm = map.get(code);
+    nm.set(name, (nm.get(name)||0) + 1);
+  }
+
+  for (const [key, rows] of groups) {
+    for (const r of rows) {
+      const dc = r.drPartnerCode ? r.drPartnerCode.trim() : '';
+      const dn = r.drPartner ? r.drPartner.trim() : '';
+      if (dc && dc !== '000000' && dn && dn !== 'その他取引先') addToMap(drMap, dc, dn);
+      else if (dc || dn) noiseCount++;
+
+      const cc = r.crPartnerCode ? r.crPartnerCode.trim() : '';
+      const cn = r.crPartner ? r.crPartner.trim() : '';
+      if (cc && cc !== '000000' && cn && cn !== 'その他取引先') addToMap(crMap, cc, cn);
+      else if (cc || cn) noiseCount++;
+    }
+  }
+
+  const allCodes = new Set([...drMap.keys(), ...crMap.keys()]);
+  const drCodes = new Set(drMap.keys());
+  const crCodes = new Set(crMap.keys());
+
+  // merged
+  const merged = new Map();
+  for (const [code, nm] of drMap) {
+    if (!merged.has(code)) merged.set(code, new Map());
+    for (const [name, cnt] of nm) merged.get(code).set(name, (merged.get(code).get(name)||0)+cnt);
+  }
+  for (const [code, nm] of crMap) {
+    if (!merged.has(code)) merged.set(code, new Map());
+    for (const [name, cnt] of nm) merged.get(code).set(name, (merged.get(code).get(name)||0)+cnt);
+  }
+
+  const partners = new Map(); // code -> name
+  const multiNameDetails = [];
+  for (const code of [...allCodes].sort()) {
+    const nm = merged.get(code);
+    if (nm.size === 1) {
+      partners.set(code, [...nm.keys()][0]);
+    } else {
+      const sorted = [...nm.entries()].sort((a,b) => b[1]-a[1]);
+      const adopted = sorted[0][0];
+      partners.set(code, adopted);
+      multiNameDetails.push({code, candidates: sorted, adopted});
+    }
+  }
+
+  return {
+    partners, // Map<code, name>
+    drOnly: new Set([...drCodes].filter(c => !crCodes.has(c))),
+    crOnly: new Set([...crCodes].filter(c => !drCodes.has(c))),
+    both: new Set([...drCodes].filter(c => crCodes.has(c))),
+    noiseCount,
+    multiNameDetails,
+    allGroups: groups
+  };
+}
+
+function countUsage(code, groups) {
+  let dr = 0, cr = 0;
+  for (const [, rows] of groups) {
+    for (const r of rows) {
+      if ((r.drPartnerCode||'').trim() === code) dr++;
+      if ((r.crPartnerCode||'').trim() === code) cr++;
+    }
+  }
+  return {dr, cr, total: dr+cr};
+}
+
+// 同名異コードグループ取得
+function getSameNameGroups(partners) {
+  const nameToCodesMap = new Map();
+  for (const [code, name] of partners) {
+    if (!nameToCodesMap.has(name)) nameToCodesMap.set(name, []);
+    nameToCodesMap.get(name).push(code);
+  }
+  const groups = new Map();
+  for (const [name, codes] of nameToCodesMap) {
+    if (codes.length > 1) groups.set(name, codes.sort());
+  }
+  return groups;
+}
+
+function applyDedupStrategy(partnerData, strategy, customChoices) {
+  if (strategy === 'warn-only') return {partnerData, codeRewriteMap:{}, nameOverrideMap:{}, auditLog:[]};
+
+  const partners = new Map(partnerData.partners);
+  const sameNameGroups = getSameNameGroups(partners);
+  if (sameNameGroups.size === 0) return {partnerData, codeRewriteMap:{}, nameOverrideMap:{}, auditLog:[]};
+
+  const codeRewriteMap = {};
+  const nameOverrideMap = {};
+  const auditLog = [];
+
+  for (const [name, codes] of [...sameNameGroups.entries()].sort()) {
+    const usage = {};
+    for (const code of codes) usage[code] = countUsage(code, partnerData.allGroups);
+    const oldCodes = [...codes];
+
+    if (strategy === 'merge-most-used' || strategy === 'merge-lowest' || strategy === 'merge-highest') {
+      let adoptedCode;
+      if (strategy === 'merge-lowest') adoptedCode = codes.reduce((a,b) => a<b?a:b);
+      else if (strategy === 'merge-highest') adoptedCode = codes.reduce((a,b) => a>b?a:b);
+      else { // merge-most-used
+        const maxUsage = Math.max(...codes.map(c => usage[c].total));
+        const cands = codes.filter(c => usage[c].total === maxUsage);
+        adoptedCode = cands.reduce((a,b) => a<b?a:b);
+      }
+      const eliminated = codes.filter(c => c !== adoptedCode);
+      for (const old of eliminated) { codeRewriteMap[old] = adoptedCode; partners.delete(old); }
+      nameOverrideMap[adoptedCode] = name;
+      const replacedTotal = eliminated.reduce((s,c) => s+usage[c].total, 0);
+      auditLog.push({name, oldCodes, action:`コード ${adoptedCode} に統合 (${strategy})`, result:`仕訳の ${eliminated.join(' / ')} → ${adoptedCode} に置換 (${replacedTotal} 件)`});
+
+    } else if (strategy === 'suffix') {
+      applySuffix(name, codes, usage, partners, nameOverrideMap);
+      auditLog.push({name, oldCodes, action:'別名化 (suffix)', result:`マスタに ${codes.length} 行`});
+
+    } else if (strategy === 'custom') {
+      const ch = (customChoices||{})[name] || {action:'merge-most-used'};
+      if (ch.action === 'merge') {
+        const targetCode = (ch.target_code && codes.includes(ch.target_code)) ? ch.target_code
+          : (() => { const mx=Math.max(...codes.map(c=>usage[c].total)); return codes.filter(c=>usage[c].total===mx).reduce((a,b)=>a<b?a:b); })();
+        const eliminated = codes.filter(c => c !== targetCode);
+        for (const old of eliminated) { codeRewriteMap[old] = targetCode; partners.delete(old); }
+        nameOverrideMap[targetCode] = name;
+        const replacedTotal = eliminated.reduce((s,c) => s+usage[c].total, 0);
+        auditLog.push({name, oldCodes, action:`コード ${targetCode} に統合 (custom)`, result:`${eliminated.join(' / ')} → ${targetCode} (${replacedTotal} 件)`});
+      } else if (ch.action === 'rename') {
+        applySuffix(name, codes, usage, partners, nameOverrideMap);
+        auditLog.push({name, oldCodes, action:'別名化 (custom)', result:`マスタに ${codes.length} 行`});
+      } else if (ch.action === 'skip') {
+        for (const code of codes) partners.delete(code);
+        auditLog.push({name, oldCodes, action:'スキップ (custom)', result:'マスタから除外'});
+      }
+    }
+  }
+
+  const newData = Object.assign({}, partnerData, {partners});
+  return {partnerData: newData, codeRewriteMap, nameOverrideMap, auditLog};
+}
+
+function applySuffix(name, codes, usage, partners, nameOverrideMap) {
+  const sorted = [...codes].sort((a,b) => (usage[b].total - usage[a].total) || (a<b?-1:1));
+  sorted.forEach((code, rank) => {
+    const displayName = rank === 0 ? name : `${name}_${rank+1}`;
+    nameOverrideMap[code] = displayName;
+    partners.set(code, displayName);
+  });
+}
+
+// ファイル分割 (伝票境界をまたがない)
+function splitOutputFiles(allRows, slipSizes, rowsPerFile) {
+  const files = [];
+  let fileRows = [], currentCount = 0, rowCursor = 0, slipCursor = 0;
+
+  while (slipCursor < slipSizes.length) {
+    if (currentCount >= rowsPerFile && currentCount > 0) {
+      files.push([...fileRows]);
+      fileRows = []; currentCount = 0;
+    }
+    const slipSize = slipSizes[slipCursor][1];
+    for (let i = 0; i < slipSize; i++) fileRows.push(allRows[rowCursor + i]);
+    rowCursor += slipSize; currentCount += slipSize; slipCursor++;
+  }
+  if (fileRows.length > 0) files.push(fileRows);
+  return files;
+}
+
+// ===========================================================================
+// UI 状態管理
+// ===========================================================================
+
+let selectedFiles = [];
+let conversionResult = null;
+let pendingDedupGroups = null;
+let pendingDedupCallback = null;
+
+// ページ切替
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.querySelectorAll('.sidebar-nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('nav-' + name).classList.add('active');
+  if (name === 'history') renderHistory();
+}
+
+// ステップ管理
+function updateStepIndicator(step) {
+  for (let i = 1; i <= 3; i++) {
+    const el = document.getElementById('step-' + i);
+    el.className = 'step' + (i < step ? ' done' : i === step ? ' active' : '');
+  }
+}
+
+function goToStep1() {
+  document.getElementById('section-step1').style.display = '';
+  document.getElementById('section-step2').style.display = 'none';
+  document.getElementById('section-step3').style.display = 'none';
+  updateStepIndicator(1);
+}
+
+function goToStep2() {
+  if (selectedFiles.length === 0) return;
+  loadSettings();
+  document.getElementById('section-step1').style.display = 'none';
+  document.getElementById('section-step2').style.display = '';
+  document.getElementById('section-step3').style.display = 'none';
+  updateStepIndicator(2);
+}
+
+function resetToStep1() {
+  selectedFiles = [];
+  conversionResult = null;
+  renderFileList();
+  document.getElementById('btn-to-step2').disabled = true;
+  goToStep1();
+}
+
+// ファイル管理
+function addFiles(fileList) {
+  for (const f of fileList) {
+    if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
+      selectedFiles.push(f);
+    }
+  }
+  renderFileList();
+  document.getElementById('btn-to-step2').disabled = selectedFiles.length === 0;
+}
+
+function removeFile(idx) {
+  selectedFiles.splice(idx, 1);
+  renderFileList();
+  document.getElementById('btn-to-step2').disabled = selectedFiles.length === 0;
+}
+
+function renderFileList() {
+  const el = document.getElementById('file-list');
+  if (selectedFiles.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = selectedFiles.map((f, i) => `
+    <div class="file-item">
+      <span class="file-item-icon">📄</span>
+      <span class="file-item-name">${escHtml(f.name)}</span>
+      <span class="file-item-size">${formatBytes(f.size)}</span>
+      <button class="file-item-remove" onclick="removeFile(${i})" title="削除">✕</button>
+    </div>`).join('');
+}
+
+// パートナーオプション表示切替
+function togglePartnerOptions() {
+  const show = document.getElementById('opt-output-partners').checked;
+  document.getElementById('partner-options').style.display = show ? '' : 'none';
+}
+
+// ===========================================================================
+// 変換実行
+// ===========================================================================
+
+async function executeConversion() {
+  saveSettings();
+  const opts = getOptions();
+
+  // Step2 → Step3
+  document.getElementById('section-step2').style.display = 'none';
+  document.getElementById('section-step3').style.display = '';
+  updateStepIndicator(3);
+
+  const resultEl = document.getElementById('result-content');
+  resultEl.innerHTML = `<div class="card"><div style="display:flex;align-items:center;gap:12px;padding:20px;">
+    <div class="spinner"></div><div>変換処理中...</div></div></div>`;
+
+  try {
+    // ファイル読込
+    const allGroups = new Map();
+    let totalInput = 0;
+    const errors = {tax: [], amount: [], balance: [], dateFormat: []};
+
+    for (const file of selectedFiles) {
+      const text = await readFileText(file);
+      const rows = parseCSV(text);
+      if (rows.length === 0) continue;
+
+      const headerRow = rows[0];
+      const headerIdx = buildHeaderIndex(headerRow);
+
+      // 必須カラムチェック
+      const missing = REQUIRED_COLS.filter(c => !(c in headerIdx));
+      if (missing.length > 0) {
+        throw new Error(`ファイル「${file.name}」に必須カラムが見つかりません:\n${missing.join(', ')}\n\n検出されたヘッダー:\n${headerRow.join(', ')}`);
+      }
+
+      const DATE_PATTERN = /^\d{4}\/\d{2}\/\d{2}$/;
+      const dateFrom = opts.dateFrom;
+      const dateTo   = opts.dateTo;
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || row.length === 0) continue;
+        const dateStr = getCol(row, headerIdx, OBC_COL_DATE).trim();
+        if (!dateStr) continue;
+
+        // 日付フォーマットチェック
+        if (!DATE_PATTERN.test(dateStr)) {
+          errors.dateFormat.push({file: file.name, lineNo: i+1, slipNo: getCol(row, headerIdx, OBC_COL_SLIP_NO).trim(), rawVal: dateStr});
+        }
+
+        // 期間フィルタ
+        if (dateFrom || dateTo) {
+          const d = parseDateStr(dateStr);
+          if (d) {
+            if (dateFrom && d < dateFrom) continue;
+            if (dateTo && d > dateTo) continue;
+          }
+        }
+
+        const r = obcRowToFreee(row, headerIdx, i+1, errors);
+        const key = r.date + '\t' + r.slipNo;
+        if (!allGroups.has(key)) allGroups.set(key, []);
+        allGroups.get(key).push(r);
+        totalInput++;
+      }
+    }
+
+    // 取引先収集
+    let partnerData = null, codeRewriteMap = {}, nameOverrideMap = {}, dedupAuditLog = [];
+    if (opts.outputPartners) {
+      partnerData = collectPartners(allGroups);
+
+      if (opts.dedupStrategy === 'interactive') {
+        // 対話モード: モーダル表示して待機
+        const sameNameGroups = getSameNameGroups(partnerData.partners);
+        if (sameNameGroups.size > 0) {
+          const customChoices = await showDedupModal(sameNameGroups, partnerData.allGroups);
+          ({partnerData, codeRewriteMap, nameOverrideMap, auditLog: dedupAuditLog} =
+            applyDedupStrategy(partnerData, 'custom', customChoices));
+        }
+      } else {
+        ({partnerData, codeRewriteMap, nameOverrideMap, auditLog: dedupAuditLog} =
+          applyDedupStrategy(partnerData, opts.dedupStrategy, null));
+      }
+    }
+
+    // グループ処理
+    const {allRows, slipSizes, totalSkipped} = processGroups(
+      allGroups,
+      Object.keys(codeRewriteMap).length ? codeRewriteMap : null,
+      Object.keys(nameOverrideMap).length ? nameOverrideMap : null
+    );
+
+    // 借貸整合性チェック
+    const balanceResult = checkSlipBalance(allRows);
+    errors.balance = balanceResult.unknown;
+
+    // 奉行原本監査
+    const auditResult = auditObcSource(allGroups, opts.dateFrom, opts.dateTo);
+
+    // ファイル分割
+    const fileParts = splitOutputFiles(allRows, slipSizes, opts.rowsPerFile);
+
+    // CSV Blob 生成
+    const outputFiles = [];
+    fileParts.forEach((rows, idx) => {
+      const fname = `${opts.prefix}_${String(idx+1).padStart(3,'0')}.csv`;
+      const blob = createCSVBlob([FREEE_HEADER, ...rows]);
+      outputFiles.push({name: fname, blob, rows: [FREEE_HEADER, ...rows], type: 'journal', rowCount: rows.length});
+    });
+
+    // 取引先マスタ
+    if (opts.outputPartners && partnerData) {
+      const sortedCodes = [...partnerData.partners.keys()].sort();
+      const partnerRows = sortedCodes.map(code => {
+        const row = new Array(FREEE_PARTNER_HEADER.length).fill('');
+        row[0] = partnerData.partners.get(code);
+        row[1] = code;
+        row[4] = partnerData.partners.get(code);
+        return row;
+      });
+      const fname = `${opts.partnersPrefix}.csv`;
+      const blob = createCSVBlob([FREEE_PARTNER_HEADER, ...partnerRows]);
+      outputFiles.push({name: fname, blob, rows: [FREEE_PARTNER_HEADER, ...partnerRows], type: 'partner', rowCount: partnerRows.length});
+    }
+
+    conversionResult = {
+      outputFiles, totalInput, totalOutput: allRows.length,
+      slipCount: allGroups.size, partnerData, dedupAuditLog,
+      errors, balanceResult, auditResult, totalSkipped,
+      opts
+    };
+
+    // ヒストリ保存
+    saveHistory(conversionResult);
+
+    renderResult(conversionResult);
+  } catch(e) {
+    resultEl.innerHTML = `<div class="card"><div class="alert alert-error"><strong>エラー:</strong><br><pre style="white-space:pre-wrap;font-size:12px;">${escHtml(e.message)}</pre></div>
+      <button class="btn btn-secondary" onclick="goToStep2()">← オプションに戻る</button></div>`;
+  }
+}
+
+function getOptions() {
+  const dateFromStr = document.getElementById('opt-date-from').value;
+  const dateToStr   = document.getElementById('opt-date-to').value;
+  return {
+    prefix: document.getElementById('opt-prefix').value || 'freee用_仕訳データ_obc変換',
+    rowsPerFile: parseInt(document.getElementById('opt-rows-per-file').value) || 10000,
+    dateFrom: dateFromStr ? new Date(dateFromStr) : null,
+    dateTo:   dateToStr   ? new Date(dateToStr + 'T23:59:59') : null,
+    outputPartners: document.getElementById('opt-output-partners').checked,
+    partnersPrefix: document.getElementById('opt-partners-prefix').value || 'freee取引先マスタ',
+    dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+  };
+}
+
+// ===========================================================================
+// dedup 対話モーダル
+// ===========================================================================
+
+function showDedupModal(sameNameGroups, allGroups) {
+  return new Promise((resolve) => {
+    const choices = {};
+    const modal = document.getElementById('dedup-modal');
+    const body = document.getElementById('dedup-modal-body');
+
+    const groupArr = [...sameNameGroups.entries()].sort();
+    body.innerHTML = groupArr.map(([name, codes]) => {
+      const usages = codes.map(code => {
+        const u = countUsage(code, allGroups);
+        return {code, ...u};
+      });
+      return `
+        <div class="dedup-card" data-name="${escAttr(name)}">
+          <div class="dedup-card-name">${escHtml(name)}</div>
+          <table class="dedup-code-table">
+            <thead><tr><th>コード</th><th>借方使用</th><th>貸方使用</th><th>合計</th></tr></thead>
+            <tbody>${usages.map(u => `<tr><td>${escHtml(u.code)}</td><td>${u.dr}</td><td>${u.cr}</td><td>${u.total}</td></tr>`).join('')}</tbody>
+          </table>
+          <div class="radio-options">
+            ${codes.map(code => `
+              <label>
+                <input type="radio" name="dedup_${escAttr(name)}" value="merge_${escAttr(code)}">
+                コード ${escHtml(code)} に統合
+              </label>`).join('')}
+            <label>
+              <input type="radio" name="dedup_${escAttr(name)}" value="suffix">
+              別名化 (_2 付与)
+            </label>
+            <label>
+              <input type="radio" name="dedup_${escAttr(name)}" value="skip">
+              マスタから除外
+            </label>
+          </div>
+        </div>`;
+    }).join('');
+
+    // 自動推奨 (最多使用) をデフォルト選択
+    groupArr.forEach(([name, codes]) => {
+      const usages = codes.map(code => ({code, total: countUsage(code, allGroups).total}));
+      const maxTotal = Math.max(...usages.map(u => u.total));
+      const best = usages.filter(u => u.total === maxTotal).map(u=>u.code).sort()[0];
+      const radio = body.querySelector(`input[name="dedup_${CSS.escape(name)}"][value="merge_${CSS.escape(best)}"]`);
+      if (radio) radio.checked = true;
+    });
+
+    modal.style.display = 'flex';
+
+    window._dedupResolve = (autoAll) => {
+      body.querySelectorAll('.dedup-card').forEach(card => {
+        const name = card.dataset.name;
+        const codes = [...sameNameGroups.get(name)];
+        if (autoAll) {
+          const usages = codes.map(code => ({code, total: countUsage(code, allGroups).total}));
+          const maxTotal = Math.max(...usages.map(u => u.total));
+          const best = usages.filter(u => u.total === maxTotal).map(u=>u.code).sort()[0];
+          choices[name] = {action: 'merge', target_code: best};
+        } else {
+          const selected = card.querySelector(`input[name="dedup_${CSS.escape(name)}"]:checked`);
+          if (!selected) { choices[name] = {action: 'merge', target_code: codes[0]}; return; }
+          const val = selected.value;
+          if (val.startsWith('merge_')) choices[name] = {action: 'merge', target_code: val.slice(6)};
+          else if (val === 'suffix') choices[name] = {action: 'rename'};
+          else choices[name] = {action: 'skip'};
+        }
+      });
+      modal.style.display = 'none';
+      resolve(choices);
+    };
+  });
+}
+
+function dedupAutoAll() { if(window._dedupResolve) window._dedupResolve(true); }
+function dedupConfirm() { if(window._dedupResolve) window._dedupResolve(false); }
+
+// ===========================================================================
+// 結果レンダリング
+// ===========================================================================
+
+function renderResult(r) {
+  const el = document.getElementById('result-content');
+  const partnerCount = r.partnerData ? r.partnerData.partners.size : 0;
+  const balanceIssue = r.balanceResult.unknown.length;
+
+  // サマリカード
+  const summaryHTML = `
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-card-num">${r.outputFiles.filter(f=>f.type==='journal').length}</div>
+        <div class="summary-card-label">仕訳CSVファイル数</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-card-num">${r.totalOutput.toLocaleString()}</div>
+        <div class="summary-card-label">出力行数(合計)</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-card-num">${r.totalInput.toLocaleString()}</div>
+        <div class="summary-card-label">入力行数(合計)</div>
+      </div>
+      ${partnerCount > 0 ? `<div class="summary-card ok">
+        <div class="summary-card-num">${partnerCount}</div>
+        <div class="summary-card-label">取引先マスタ件数</div>
+      </div>` : ''}
+      ${balanceIssue > 0 ? `<div class="summary-card warn">
+        <div class="summary-card-num">${balanceIssue}</div>
+        <div class="summary-card-label">借貸不一致(要確認)</div>
+      </div>` : ''}
+      ${r.errors.tax.length > 0 ? `<div class="summary-card warn">
+        <div class="summary-card-num">${r.errors.tax.length}</div>
+        <div class="summary-card-label">未知税区分(要確認)</div>
+      </div>` : ''}
+    </div>`;
+
+  // 出力ファイル一覧
+  const filesHTML = r.outputFiles.map((f, idx) => `
+    <div class="result-file-item">
+      <span class="result-file-type ${f.type === 'journal' ? 'type-journal' : 'type-partner'}">${f.type === 'journal' ? '仕訳' : '取引先'}</span>
+      <span class="result-file-name">${escHtml(f.name)}</span>
+      <span class="result-file-meta">${f.rowCount.toLocaleString()} 行 / ${formatBytes(f.blob.size)}</span>
+      <button class="btn btn-success btn-sm" onclick="downloadOutput(${idx})">ダウンロード</button>
+    </div>`).join('');
+
+  const allDownloadBtn = r.outputFiles.length > 1 ? `<button class="btn btn-primary btn-sm" onclick="downloadAll()" style="margin-bottom:12px;">全ファイルをダウンロード</button>` : '';
+
+  // CSV プレビュー (タブ切替)
+  const previewTabs = r.outputFiles.map((f,i) => `<button class="tab ${i===0?'active':''}" onclick="switchPreviewTab(${i}, this)">${escHtml(f.name)}</button>`).join('');
+  const previewContents = r.outputFiles.map((f,i) => `<div class="tab-content ${i===0?'active':''}" id="preview-tab-${i}"></div>`).join('');
+
+  // 監査ログ
+  const auditHTML = renderAuditSections(r);
+
+  // dedup 結果
+  const dedupHTML = r.dedupAuditLog && r.dedupAuditLog.length > 0 ? `
+    <div class="card">
+      <div class="card-title">同名異コード対処結果</div>
+      <table class="audit-table">
+        <thead><tr><th>取引先名</th><th>元コード</th><th>対処</th><th>結果</th></tr></thead>
+        <tbody>${r.dedupAuditLog.map(e => `<tr>
+          <td>${escHtml(e.name)}</td>
+          <td>${escHtml(e.oldCodes.join(' / '))}</td>
+          <td>${escHtml(e.action)}</td>
+          <td>${escHtml(e.result)}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>` : '';
+
+  // freee手順 (折りたたみ)
+  const howtoHTML = `
+    <div class="audit-section expanded">
+      <div class="audit-header" onclick="toggleAudit(this)">
+        <span class="audit-title">freee アップロード手順</span>
+        <span class="audit-chevron">▲</span>
+      </div>
+      <div class="audit-body open">
+        <ol class="steps-list">
+          <li>freeeにログイン → <strong>経費・振替 → 仕訳帳</strong></li>
+          <li>右上 <strong>「インポート」</strong> をクリック</li>
+          <li><strong>freee形式 CSVファイル</strong> を選択</li>
+          <li>生成ファイルを番号順にアップロード</li>
+          <li>プレビュー確認後 <strong>インポート実行</strong></li>
+          ${r.opts.outputPartners ? '<li>取引先マスタ: <strong>取引先 → 取引先インポート</strong> からアップロード</li>' : ''}
+        </ol>
+      </div>
+    </div>`;
+
+  el.innerHTML = `
+    <div class="card">${summaryHTML}
+      <div class="card-title" style="margin-top:8px;">出力ファイル</div>
+      ${allDownloadBtn}
+      ${filesHTML}
+    </div>
+    <div class="card" style="padding:0;">
+      <div style="padding:16px 16px 0; font-weight:600; font-size:14px;">CSVプレビュー</div>
+      <div class="tabs" id="preview-tabs">${previewTabs}</div>
+      <div id="preview-tab-contents">${previewContents}</div>
+    </div>
+    ${auditHTML}
+    ${dedupHTML}
+    ${howtoHTML}`;
+
+  // 初期タブのテーブルを描画
+  renderPreviewTable(0, r.outputFiles[0].rows);
+}
+
+function renderAuditSections(r) {
+  const sections = [];
+  const audit = r.auditResult;
+  const errors = r.errors;
+  const balance = r.balanceResult;
+
+  // 1. 借貸不一致 (奉行原本)
+  if (audit.mismatches.length > 0) {
+    const rows = audit.mismatches.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+      <td>${m.dr.toLocaleString()}</td><td>${m.cr.toLocaleString()}</td><td>${(m.dr-m.cr).toLocaleString()}</td></tr>`).join('');
+    sections.push({title:'[要確認 1/2] 奉行原本の借貸不一致伝票', count: audit.mismatches.length, type:'warn',
+      body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 2. 課売上マイナス
+  if (audit.minusKaubai.length > 0) {
+    const rows = audit.minusKaubai.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+      <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
+    sections.push({title:'[要確認 2/2] 課売上+マイナス (課売返への振替検討)', count: audit.minusKaubai.length, type:'warn',
+      body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>金額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 取引先 A: 同コード異名
+  if (r.partnerData && r.partnerData.multiNameDetails.length > 0) {
+    const rows = r.partnerData.multiNameDetails.map(d =>
+      `<tr><td>${escHtml(d.code)}</td><td>${d.candidates.map(([n,c])=>`${escHtml(n)}(${c}件)`).join(' / ')}</td><td>${escHtml(d.adopted)}</td></tr>`).join('');
+    sections.push({title:'[要確認 取引先マスタ A] 同コード異名', count: r.partnerData.multiNameDetails.length, type:'info',
+      body:`<table class="audit-table"><thead><tr><th>コード</th><th>候補名(件数)</th><th>採用名</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 取引先 B: 同名異コード (dedup後)
+  if (r.partnerData) {
+    const sameNameGroups = getSameNameGroups(r.partnerData.partners);
+    if (sameNameGroups.size > 0) {
+      const rows = [...sameNameGroups.entries()].sort().map(([name,codes]) =>
+        `<tr><td>${escHtml(name)}</td><td>${codes.map(escHtml).join(' / ')}</td></tr>`).join('');
+      sections.push({title:`[要確認 取引先マスタ B] 同名異コード`, count: sameNameGroups.size, type:'warn',
+        body:`<table class="audit-table"><thead><tr><th>取引先名</th><th>コード群</th></tr></thead><tbody>${rows}</tbody></table>`});
+    }
+  }
+
+  // 未知税区分
+  if (errors.tax.length > 0) {
+    const unique = {};
+    errors.tax.forEach(e => { const k = e.label+'|'+e.rate; if(!unique[k]) unique[k] = {...e, count:0}; unique[k].count++; });
+    const rows = Object.values(unique).map(e => `<tr><td>${escHtml(e.label)}</td><td>${escHtml(e.rate||'(空)')}</td><td>${e.count}</td></tr>`).join('');
+    sections.push({title:'未知税区分 (対象外で仮置き)', count: errors.tax.length, type:'warn',
+      body:`<table class="audit-table"><thead><tr><th>税区分略称</th><th>税率</th><th>件数</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 出力CSV借貸不一致 (未知)
+  if (balance.unknown.length > 0) {
+    const rows = balance.unknown.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+      <td>${m.dr.toLocaleString()}</td><td>${m.cr.toLocaleString()}</td><td>${(m.dr-m.cr).toLocaleString()}</td></tr>`).join('');
+    sections.push({title:'出力CSV 借貸不一致 (変換バグ疑い)', count: balance.unknown.length, type:'warn',
+      body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方</th><th>貸方</th><th>差</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  if (sections.length === 0) {
+    return `<div class="card"><div class="alert alert-success">監査ログに要確認項目はありません。出力CSVをfreeeへアップロード可能です。</div></div>`;
+  }
+
+  const html = sections.map(s => `
+    <div class="audit-section">
+      <div class="audit-header" onclick="toggleAudit(this)">
+        <span class="audit-title">${escHtml(s.title)}</span>
+        <span class="audit-badge badge-${s.type}">${s.count}件</span>
+        <span class="audit-chevron">▼</span>
+      </div>
+      <div class="audit-body">${s.body}</div>
+    </div>`).join('');
+
+  return `<div class="card"><div class="card-title">監査ログ</div>${html}</div>`;
+}
+
+function toggleAudit(header) {
+  const section = header.closest('.audit-section');
+  const body = section.querySelector('.audit-body');
+  section.classList.toggle('expanded');
+  body.classList.toggle('open');
+}
+
+// ===========================================================================
+// CSV プレビュー (ソート・検索・ページネーション)
+// ===========================================================================
+
+const previewState = {};
+
+function switchPreviewTab(idx, btn) {
+  document.querySelectorAll('#preview-tabs .tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('#preview-tab-contents .tab-content').forEach(t => t.classList.remove('active'));
+  document.getElementById('preview-tab-' + idx).classList.add('active');
+  if (!conversionResult) return;
+  const fileData = conversionResult.outputFiles[idx];
+  if (fileData) renderPreviewTable(idx, fileData.rows);
+}
+
+function renderPreviewTable(idx, rows) {
+  if (!rows || rows.length === 0) return;
+  if (!previewState[idx]) {
+    previewState[idx] = {sortCol: -1, sortAsc: true, search: '', page: 0, pageSize: 100, allRows: rows};
+  }
+  const state = previewState[idx];
+  state.allRows = rows;
+
+  const header = rows[0];
+  const dataRows = rows.slice(1);
+
+  // 検索フィルタ
+  const q = (state.search||'').toLowerCase();
+  let filtered = q ? dataRows.filter(row => row.some(c => String(c).toLowerCase().includes(q))) : dataRows;
+
+  // ソート
+  if (state.sortCol >= 0) {
+    const col = state.sortCol;
+    filtered = [...filtered].sort((a,b) => {
+      const av = String(a[col]||''), bv = String(b[col]||'');
+      const an = Number(av), bn = Number(bv);
+      const cmp = (!isNaN(an) && !isNaN(bn)) ? (an-bn) : av.localeCompare(bv, 'ja');
+      return state.sortAsc ? cmp : -cmp;
+    });
+  }
+
+  const total = filtered.length;
+  const pages = Math.ceil(total / state.pageSize);
+  const page = Math.min(state.page, Math.max(0, pages-1));
+  state.page = page;
+  const pageRows = filtered.slice(page * state.pageSize, (page+1) * state.pageSize);
+
+  // ハイライト
+  function hl(text) {
+    if (!q) return escHtml(text);
+    const s = String(text);
+    const idx2 = s.toLowerCase().indexOf(q);
+    if (idx2 < 0) return escHtml(s);
+    return escHtml(s.slice(0,idx2)) + `<mark class="highlight">${escHtml(s.slice(idx2,idx2+q.length))}</mark>` + escHtml(s.slice(idx2+q.length));
+  }
+
+  const thHtml = header.map((h, ci) => {
+    let cls = '';
+    if (state.sortCol === ci) cls = state.sortAsc ? 'sort-asc' : 'sort-desc';
+    return `<th class="${cls}" onclick="sortPreview(${idx},${ci})">${escHtml(h)}</th>`;
+  }).join('');
+
+  const tdHtml = pageRows.map(row =>
+    `<tr>${header.map((_,ci) => `<td>${hl(row[ci]??'')}</td>`).join('')}</tr>`
+  ).join('');
+
+  // ページネーション
+  let paginHtml = '';
+  if (pages > 1) {
+    const start = Math.max(0, page-2), end = Math.min(pages-1, page+2);
+    paginHtml = `<div class="pagination">
+      <button class="page-btn" onclick="setPreviewPage(${idx},0)" ${page===0?'disabled':''}>«</button>
+      <button class="page-btn" onclick="setPreviewPage(${idx},${page-1})" ${page===0?'disabled':''}>‹</button>
+      ${Array.from({length:end-start+1},(_,i)=>start+i).map(p=>
+        `<button class="page-btn ${p===page?'active':''}" onclick="setPreviewPage(${idx},${p})">${p+1}</button>`).join('')}
+      <button class="page-btn" onclick="setPreviewPage(${idx},${page+1})" ${page>=pages-1?'disabled':''}>›</button>
+      <button class="page-btn" onclick="setPreviewPage(${idx},${pages-1})" ${page>=pages-1?'disabled':''}>»</button>
+    </div>`;
+  }
+
+  const container = document.getElementById('preview-tab-' + idx);
+  container.innerHTML = `
+    <div class="table-controls">
+      <input class="table-search" type="text" placeholder="検索..." value="${escAttr(state.search)}"
+        oninput="searchPreview(${idx},this.value)">
+      <span class="table-info">${total.toLocaleString()} 行 (全 ${(rows.length-1).toLocaleString()} 行中)</span>
+      ${paginHtml}
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr>${thHtml}</tr></thead>
+        <tbody>${tdHtml}</tbody>
+      </table>
+    </div>`;
+}
+
+function sortPreview(idx, col) {
+  const state = previewState[idx];
+  if (state.sortCol === col) state.sortAsc = !state.sortAsc;
+  else { state.sortCol = col; state.sortAsc = true; }
+  state.page = 0;
+  renderPreviewTable(idx, state.allRows);
+}
+
+function searchPreview(idx, q) {
+  previewState[idx].search = q;
+  previewState[idx].page = 0;
+  renderPreviewTable(idx, previewState[idx].allRows);
+}
+
+function setPreviewPage(idx, p) {
+  previewState[idx].page = p;
+  renderPreviewTable(idx, previewState[idx].allRows);
+}
+
+// ダウンロード
+function downloadOutput(idx) {
+  if (!conversionResult) return;
+  const f = conversionResult.outputFiles[idx];
+  downloadBlob(f.blob, f.name);
+}
+
+function downloadAll() {
+  if (!conversionResult) return;
+  conversionResult.outputFiles.forEach((f, i) => {
+    setTimeout(() => downloadBlob(f.blob, f.name), i * 300);
+  });
+}
+
+// ===========================================================================
+// localStorage: 設定・ヒストリ
+// ===========================================================================
+
+function saveSettings() {
+  try {
+    localStorage.setItem('obc_settings', JSON.stringify({
+      prefix: document.getElementById('opt-prefix').value,
+      rowsPerFile: document.getElementById('opt-rows-per-file').value,
+      dateFrom: document.getElementById('opt-date-from').value,
+      dateTo: document.getElementById('opt-date-to').value,
+      outputPartners: document.getElementById('opt-output-partners').checked,
+      partnersPrefix: document.getElementById('opt-partners-prefix').value,
+      dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+    }));
+  } catch(e) {}
+}
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem('obc_settings')||'{}');
+    if (s.prefix) document.getElementById('opt-prefix').value = s.prefix;
+    if (s.rowsPerFile) document.getElementById('opt-rows-per-file').value = s.rowsPerFile;
+    if (s.dateFrom) document.getElementById('opt-date-from').value = s.dateFrom;
+    if (s.dateTo) document.getElementById('opt-date-to').value = s.dateTo;
+    if (s.outputPartners != null) {
+      document.getElementById('opt-output-partners').checked = s.outputPartners;
+      togglePartnerOptions();
+    }
+    if (s.partnersPrefix) document.getElementById('opt-partners-prefix').value = s.partnersPrefix;
+    if (s.dedupStrategy) document.getElementById('opt-dedup-strategy').value = s.dedupStrategy;
+  } catch(e) {}
+}
+
+function saveHistory(result) {
+  try {
+    const hist = JSON.parse(localStorage.getItem('obc_history')||'[]');
+    hist.unshift({
+      ts: new Date().toISOString(),
+      files: selectedFiles.map(f=>f.name),
+      totalInput: result.totalInput,
+      totalOutput: result.totalOutput,
+      partnerCount: result.partnerData ? result.partnerData.partners.size : 0,
+      dedupCount: result.dedupAuditLog ? result.dedupAuditLog.length : 0,
+      outputFileCount: result.outputFiles.length,
+      prefix: result.opts.prefix,
+    });
+    if (hist.length > 20) hist.length = 20;
+    localStorage.setItem('obc_history', JSON.stringify(hist));
+  } catch(e) {}
+}
+
+function renderHistory() {
+  const el = document.getElementById('history-list');
+  try {
+    const hist = JSON.parse(localStorage.getItem('obc_history')||'[]');
+    if (hist.length === 0) { el.innerHTML = '<p style="color:var(--gray-500);font-size:13px;">変換履歴がありません。</p>'; return; }
+    el.innerHTML = hist.map((h, i) => `
+      <div class="history-item">
+        <div class="history-meta">
+          <div class="history-time">${new Date(h.ts).toLocaleString('ja-JP')}</div>
+          <div class="history-summary">入力 ${(h.totalInput||0).toLocaleString()} 行 → 出力 ${(h.totalOutput||0).toLocaleString()} 行 / ${h.outputFileCount}ファイル</div>
+          <div class="history-detail">ファイル: ${(h.files||[]).map(escHtml).join(', ')}
+            ${h.partnerCount ? ` / 取引先 ${h.partnerCount} 件` : ''}
+            ${h.dedupCount ? ` / dedup ${h.dedupCount} 件` : ''}
+          </div>
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = '<p style="color:var(--red);">履歴の読み込みに失敗しました。</p>'; }
+}
+
+function clearStorage() {
+  if (!confirm('設定とヒストリをすべて削除しますか？')) return;
+  localStorage.removeItem('obc_settings');
+  localStorage.removeItem('obc_history');
+  alert('削除しました。');
+}
+
+// ===========================================================================
+// ユーティリティ (HTML)
+// ===========================================================================
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function escAttr(s) { return escHtml(s); }
+
+// ===========================================================================
+// イベントリスナー
+// ===========================================================================
+
+// ドラッグ&ドロップ
+const dropZone = document.getElementById('drop-zone');
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  addFiles(e.dataTransfer.files);
+});
+
+document.getElementById('file-input').addEventListener('change', e => {
+  addFiles(e.target.files);
+  e.target.value = '';
+});
+
+// 初期化
+loadSettings();
+</script>
+</body>
+</html>
