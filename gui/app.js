@@ -13,7 +13,9 @@ const state = {
   dedupChoices: {},        // {取引先名: {action, target_code}} ユーザー選択
 };
 
-const BASE = 'http://localhost:8765';
+// 相対 URL を使用: Python GUI バックエンドと同一オリジン前提のため
+// 'http://localhost:8765' のようなハードコードを避ける
+const BASE = '';
 
 // ============================================================
 // Toast helper
@@ -958,41 +960,6 @@ function escHtml(s) {
 function escAttr(s) { return escHtml(s); }
 
 // ============================================================
-// Mock result (for offline UI check — remove or comment out in production)
-// ============================================================
-function injectMockResult() {
-  state.result = {
-    success: true,
-    timestamp: new Date().toISOString(),
-    stdout: 'mock output',
-    stderr: '',
-    exitCode: 0,
-    outputs: [
-      { filename: 'freee用_仕訳データ_obc変換_001.csv', path: '/tmp/freee用_001.csv', type: 'slip',    rows: 8543, size: 1048576 },
-      { filename: 'freee用_仕訳データ_obc変換_002.csv', path: '/tmp/freee用_002.csv', type: 'slip',    rows: 1457, size: 221184  },
-      { filename: 'freee取引先マスタ.csv',               path: '/tmp/freee取引先.csv',  type: 'partner', rows: 234,  size: 32768   },
-    ],
-    summary: {
-      totalSlipRows: 10000,
-      totalPartnerCount: 234,
-      slipFiles: 2,
-      auditA: [
-        ['C001', '山田商事株式会社', '山田商事(株)'],
-        ['C002', '鈴木電機', '鈴木電機工業'],
-      ],
-      auditB: [
-        ['東京物流センター', 'L001', 'L009'],
-      ],
-      balanceWarnings: [],
-      negativeWarnings: [
-        ['2024-03-15', '売上高', -12500],
-      ],
-    },
-  };
-  renderResultSuccess(state.result);
-}
-
-// ============================================================
 // Init
 // ============================================================
 window.addEventListener('DOMContentLoaded', async () => {
@@ -1016,10 +983,5 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   // Step 3 restart button (already visible in DOM, just re-bind handled by initRestart)
 
-  // ---- Dev mode: uncomment to test result UI offline ----
-  // goToStep(3);
-  // injectMockResult();
-  // -------------------------------------------------------
-
-  console.log('[obc_to_freee] GUI initialized. Server:', BASE);
+  console.log('[obc_to_freee] GUI initialized.');
 });
