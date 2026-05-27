@@ -15,12 +15,13 @@ import mimetypes
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from http.server import BaseHTTPRequestHandler
@@ -50,14 +51,38 @@ DEFAULT_SETTINGS = {
     "encoding": "auto",
 }
 
+UPLOAD_TTL_DAYS = 7  # デフォルト TTL (--upload-ttl-days で変更可)
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+TOKEN_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$')
+
 # ---------------------------------------------------------------------------
 # ストレージ初期化
 # ---------------------------------------------------------------------------
 
-def setup_storage_dirs():
-    """~/.obc_to_freee_gui/ 配下のディレクトリを作成"""
+def cleanup_old_dirs(base_dir: pathlib.Path, ttl_days: int):
+    """base_dir 配下の <timestamp>/ ディレクトリを TTL 日数より古ければ削除する。"""
+    if not base_dir.exists():
+        return
+    cutoff = datetime.now() - timedelta(days=ttl_days)
+    for entry in base_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(entry.stat().st_mtime)
+            if mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                print(f"[GUI] TTL クリーンアップ: {entry} (mtime={mtime.date()})")
+        except Exception as e:
+            print(f"[GUI] TTL クリーンアップ失敗: {entry}: {e}")
+
+
+def setup_storage_dirs(ttl_days: int = UPLOAD_TTL_DAYS):
+    """~/.obc_to_freee_gui/ 配下のディレクトリを作成し、TTL クリーンアップを実行"""
     for d in [UPLOADS_DIR, OUTPUTS_DIR, HISTORY_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+    # 機密 CSV を含むアップロード・出力ディレクトリを TTL でクリーンアップ
+    cleanup_old_dirs(UPLOADS_DIR, ttl_days)
+    cleanup_old_dirs(OUTPUTS_DIR, ttl_days)
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +280,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        port = self.server.server_address[1]
+        self.send_header("Access-Control-Allow-Origin", f"http://127.0.0.1:{port}")
         self.end_headers()
         self.wfile.write(body)
 
@@ -480,11 +506,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "multipart/form-data が必要です"})
                 return
 
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > MAX_UPLOAD_BYTES:
+                self._send_json(
+                    {"success": False, "error": f"アップロードサイズが上限 ({MAX_UPLOAD_BYTES // 1024 // 1024}MB) を超えています"},
+                    status=413,
+                )
+                return
+
             fields, files = self._parse_multipart()
 
             # フォームフィールド取得
             output_prefix = fields.get("outputPrefix", "freee用_仕訳データ_obc変換").strip() or "freee用_仕訳データ_obc変換"
-            rows_per_file = int(fields.get("rowsPerFile", "10000").strip() or 10000)
+            rows_per_file = max(100, int(fields.get("rowsPerFile", "10000").strip() or 10000))
             date_from = fields.get("dateFrom", "").strip()
             date_to = fields.get("dateTo", "").strip()
             output_partners_str = fields.get("outputPartners", "false").strip()
@@ -612,6 +646,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "multipart/form-data が必要です"})
                 return
 
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > MAX_UPLOAD_BYTES:
+                self._send_json(
+                    {"success": False, "error": f"アップロードサイズが上限 ({MAX_UPLOAD_BYTES // 1024 // 1024}MB) を超えています"},
+                    status=413,
+                )
+                return
+
             fields, files = self._parse_multipart()
 
             if not files:
@@ -628,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
             date_to = fields.get("dateTo", "").strip()
             encoding = fields.get("encoding", "auto").strip() or "auto"
             output_prefix = fields.get("outputPrefix", "freee用_仕訳データ_obc変換").strip() or "freee用_仕訳データ_obc変換"
-            rows_per_file = int(fields.get("rowsPerFile", "10000").strip() or 10000)
+            rows_per_file = max(100, int(fields.get("rowsPerFile", "10000").strip() or 10000))
             output_partners_str = fields.get("outputPartners", "false").strip()
             output_partners = output_partners_str.lower() in ("true", "1")
             partners_prefix = fields.get("partnersPrefix", "freee取引先マスタ").strip() or "freee取引先マスタ"
@@ -734,12 +776,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"success": False, "error": "uploadToken が必要です"})
                 return
 
+            # uploadToken 形式バリデーション (YYYY-MM-DD_HH-MM-SS)
+            if not TOKEN_PATTERN.match(upload_token):
+                self._send_json({"success": False, "error": "不正な uploadToken 形式です"})
+                return
+
             # メタデータ読み込み (パストラバーサル対策: upload_token が UPLOADS_DIR 配下にあるか検証)
             upload_dir = (UPLOADS_DIR / upload_token).resolve()
             try:
                 upload_dir.relative_to(UPLOADS_DIR.resolve())
             except ValueError:
-                self._send_json({"success": False, "error": f"不正な uploadToken です"})
+                self._send_json({"success": False, "error": "不正な uploadToken です"})
                 return
             meta_path = upload_dir / "_meta.json"
             if not meta_path.exists():
@@ -869,8 +916,9 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def do_OPTIONS(self):
+        port = self.server.server_address[1]
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", f"http://127.0.0.1:{port}")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -899,10 +947,16 @@ def main():
         action="store_true",
         help="ブラウザを自動で開かない",
     )
+    parser.add_argument(
+        "--upload-ttl-days",
+        type=int,
+        default=UPLOAD_TTL_DAYS,
+        help=f"uploads/outputs ディレクトリの保持日数 (デフォルト: {UPLOAD_TTL_DAYS} 日)",
+    )
     args = parser.parse_args()
 
-    # ストレージディレクトリ作成
-    setup_storage_dirs()
+    # ストレージディレクトリ作成 + TTL クリーンアップ
+    setup_storage_dirs(ttl_days=max(1, args.upload_ttl_days))
 
     # サーバー起動
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

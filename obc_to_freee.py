@@ -1004,21 +1004,25 @@ def process_groups(groups: OrderedDict,
 # 伝票単位 借貸整合性チェック
 # ---------------------------------------------------------------------------
 
-# 奉行原本でも不一致だった伝票 (既知)
-KNOWN_MISMATCH_SLIPS = {"002193", "002820", "003305", "003613", "005192", "005195"}
+# 奉行原本でも不一致だった伝票 (既知) — デフォルト空。--known-balance-mismatches で指定
+KNOWN_MISMATCH_SLIPS: set = set()  # 空。--known-balance-mismatches で指定
 
 
-def check_slip_balance(all_rows: list, label: str = "") -> bool:
+def check_slip_balance(all_rows: list, label: str = "",
+                       known_mismatch_slips: set = None) -> bool:
     """
     出力行リストを伝票(日付+伝票番号)単位でグループ化し、
     借方金額合計と貸方金額合計を比較する。
 
-    - 既知不一致6件 → WARN: として表示 (継続)
+    - 既知不一致 (known_mismatch_slips) → WARN: として表示 (継続)
     - それ以外の不一致 → ERROR: として表示、_errors に追加 (is_ok=False)
 
     Returns:
         bool: 未知の不一致が0件なら True、1件以上なら False
     """
+    if known_mismatch_slips is None:
+        known_mismatch_slips = KNOWN_MISMATCH_SLIPS
+
     # インデックス: 借方金額=col15 (0-index), 貸方金額=col29 (0-index)
     # all_rows の各要素は to_freee_row() が返す 33列リスト
     # col index: [表題行]=0, 日付=1, 伝票番号=2, ..., 借方金額=15, 貸方金額=29
@@ -1045,7 +1049,7 @@ def check_slip_balance(all_rows: list, label: str = "") -> bool:
         cr = slip_cr[key]
         if dr != cr:
             date_str, slip_no = key
-            if slip_no in KNOWN_MISMATCH_SLIPS:
+            if slip_no in known_mismatch_slips:
                 known_mismatches.append((date_str, slip_no, dr, cr))
             else:
                 unknown_mismatches.append((date_str, slip_no, dr, cr))
@@ -1053,7 +1057,7 @@ def check_slip_balance(all_rows: list, label: str = "") -> bool:
     prefix = f"[{label}] " if label else ""
 
     if known_mismatches:
-        print(f"{prefix}奉行原本由来の既知不一致 ({len(known_mismatches)} 件):", file=sys.stderr)
+        print(f"{prefix}既知不一致 (--known-balance-mismatches 指定) ({len(known_mismatches)} 件):", file=sys.stderr)
         for date_str, slip_no, dr, cr in known_mismatches:
             print(f"  WARN: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}", file=sys.stderr)
 
@@ -1065,7 +1069,7 @@ def check_slip_balance(all_rows: list, label: str = "") -> bool:
             _errors.add_balance(slip_no=slip_no, date=date_str, dr=dr, cr=cr)
         return False
 
-    print(f"{prefix}借貸整合性チェック: 奉行原本既知不一致 {len(known_mismatches)} 件のみ → PASS", file=sys.stderr)
+    print(f"{prefix}借貸整合性チェック: 既知不一致 {len(known_mismatches)} 件のみ → PASS", file=sys.stderr)
     return True
 
 
@@ -1801,7 +1805,7 @@ def main():
     parser.add_argument("--input", nargs="+", required=True, help="奉行CSVファイルパス (複数可)")
     parser.add_argument("--output-dir", required=True, help="出力先ディレクトリ")
     parser.add_argument("--output-prefix", default="freee用_仕訳データ_obc変換", help="出力ファイル名プレフィックス")
-    parser.add_argument("--rows-per-file", type=int, default=10000, help="ファイルあたり最大行数 (伝票境界をまたがない)")
+    parser.add_argument("--rows-per-file", type=int, default=10000, help="ファイルあたり最大行数 (伝票境界をまたがない、最小 100)")
     parser.add_argument("--from", dest="date_from", default=None, help="開始日 YYYY/MM/DD (両端含む)")
     parser.add_argument("--to", dest="date_to", default=None, help="終了日 YYYY/MM/DD (両端含む)")
     parser.add_argument("--quiet-audit", action="store_true", help="監査ログ (stderr) を抑制する")
@@ -1856,6 +1860,16 @@ def main():
             "GUI の対話フロー Phase 1 で使用。--output-partners は不要。"
         ),
     )
+    parser.add_argument(
+        "--known-balance-mismatches",
+        dest="known_balance_mismatches",
+        default="",
+        help=(
+            "奉行原本で既知の借貸不一致伝票番号をカンマ区切りで指定。"
+            "例: --known-balance-mismatches \"002193,002820,003305\""
+            " (デフォルト: 空 = すべて未知扱い)"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -1865,6 +1879,16 @@ def main():
         date_from = datetime.strptime(args.date_from, "%Y/%m/%d")
     if args.date_to:
         date_to = datetime.strptime(args.date_to, "%Y/%m/%d")
+
+    # 既知不一致伝票番号パース
+    known_mismatch_slips: set = set()
+    if args.known_balance_mismatches:
+        known_mismatch_slips = {
+            s.strip() for s in args.known_balance_mismatches.split(",") if s.strip()
+        }
+
+    # rows_per_file 最小値クランプ
+    rows_per_file = max(100, args.rows_per_file)
 
     # 複数ファイルを順に読み込んでグループ統合
     all_groups = OrderedDict()
@@ -1947,7 +1971,8 @@ def main():
     # 未知の不一致は check_slip_balance 内で _errors.add_balance() に追加される。
     # 終了コード判定は後段の _errors.has_critical() で一元管理するため、戻り値は受けない。
     print()
-    check_slip_balance(all_rows, label=args.output_prefix)
+    check_slip_balance(all_rows, label=args.output_prefix,
+                       known_mismatch_slips=known_mismatch_slips)
     print()
 
     # 出力 (balance NG でも出力はスキップせず、サマリで警告)
@@ -1956,7 +1981,7 @@ def main():
         slip_sizes,
         args.output_dir,
         args.output_prefix,
-        args.rows_per_file,
+        rows_per_file,
     )
 
     print(f"\n完了: {len(written)} ファイル出力")

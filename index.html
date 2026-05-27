@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none';">
 <title>奉行→freee 仕訳変換ツール</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -304,6 +305,13 @@
               <input type="date" id="opt-date-to">
             </div>
           </div>
+          <div class="form-row">
+            <div class="form-group" style="flex:2;">
+              <label>既知不一致伝票No. (任意、カンマ区切り)</label>
+              <input type="text" id="opt-known-mismatches" placeholder="例: 002193,002820,003305" style="font-family:monospace;">
+              <div style="font-size:11px;color:var(--gray-500);margin-top:2px;">奉行原本で借貸不一致と判明している伝票番号。入力すると「既知」として WARN 扱い (ERROR 扱いしない)。</div>
+            </div>
+          </div>
           <div class="checkbox-row">
             <input type="checkbox" id="opt-output-partners" onchange="togglePartnerOptions()">
             <label for="opt-output-partners">取引先マスタCSVも生成する</label>
@@ -495,7 +503,8 @@ const TAX_MAP = {
   "|0":        "対象外"
 };
 
-const KNOWN_MISMATCH_SLIPS = new Set(["002193","002820","003305","003613","005192","005195"]);
+// 既知不一致伝票番号 — デフォルト空。UI の「既知不一致伝票No.」入力欄で指定。
+const KNOWN_MISMATCH_SLIPS = new Set();
 
 const OBC_COL_DATE = "日付";
 const OBC_COL_SLIP_NO = "伝票No.";
@@ -679,8 +688,9 @@ function obcRowToFreee(row, headerIdx, lineNo, errors) {
   if (crKamoku === '普通預金' && crHojo) { crKamoku = crHojo; crHojo = ''; }
 
   return {date, slipNo, drKamoku, drHojo, drPartner, drPartnerCode, drBumon,
-    drAmount, drTaxCode, drTaxAmount, crKamoku, crHojo, crPartner, crPartnerCode,
-    crBumon, crAmount, crTaxCode, crTaxAmount, summary};
+    drAmount, drTaxCode, drTaxAmount, drTaxLabel,
+    crKamoku, crHojo, crPartner, crPartnerCode,
+    crBumon, crAmount, crTaxCode, crTaxAmount, crTaxLabel, summary};
 }
 
 function applyFukugo(rowsBySlip, groupBumon) {
@@ -772,7 +782,8 @@ function processGroups(groups, codeRewriteMap, nameOverrideMap) {
   return {allRows, slipSizes, totalSkipped};
 }
 
-function checkSlipBalance(allRows) {
+function checkSlipBalance(allRows, knownMismatchSlips) {
+  const effectiveKnown = knownMismatchSlips || KNOWN_MISMATCH_SLIPS;
   const drMap = new Map();
   const crMap = new Map();
   for (const row of allRows) {
@@ -785,7 +796,7 @@ function checkSlipBalance(allRows) {
     const dr = drMap.get(key), cr = crMap.get(key)||0;
     if (dr !== cr) {
       const [date, slipNo] = key.split('|');
-      if (KNOWN_MISMATCH_SLIPS.has(slipNo)) known.push({date, slipNo, dr, cr});
+      if (effectiveKnown.has(slipNo)) known.push({date, slipNo, dr, cr});
       else unknown.push({date, slipNo, dr, cr});
     }
   }
@@ -812,15 +823,12 @@ function auditObcSource(allGroups, dateFrom, dateTo) {
       slipCr.set(slipKey, (slipCr.get(slipKey)||0) + (parseInt(r.crAmount||'0')||0));
       slipDate.set(slipKey, dateStr);
 
-      // 課売上+マイナス (元データのtax labelを参照 — obcRowToFreeeより前の原データが必要)
-      // obcRowToFreeeの出力にはtaxLabelがないため、drTaxCodeで判定は不可
-      // ここでは変換後データから課税売上10%/8%の判定で代用
-      if ((r.drTaxCode === '課税売上10%' || r.drTaxCode === '課税売上8%（軽）') &&
-          parseInt(r.drAmount||'0') < 0) {
+      // 課売上+マイナス: obcRowToFreee が保持する元の taxLabel (drTaxLabel/crTaxLabel) で判定
+      // drTaxCode は applyFukugo 後に「複合」行で '対象外' に上書きされるため使用不可
+      if (r.drTaxLabel === '課売上' && parseInt(r.drAmount||'0') < 0) {
         minusKaubai.push({slipNo: r.slipNo, date: dateStr, side: '借方', amount: parseInt(r.drAmount), summary: r.summary});
       }
-      if ((r.crTaxCode === '課税売上10%' || r.crTaxCode === '課税売上8%（軽）') &&
-          parseInt(r.crAmount||'0') < 0) {
+      if (r.crTaxLabel === '課売上' && parseInt(r.crAmount||'0') < 0) {
         minusKaubai.push({slipNo: r.slipNo, date: dateStr, side: '貸方', amount: parseInt(r.crAmount), summary: r.summary});
       }
     }
@@ -1205,7 +1213,7 @@ async function executeConversion() {
     );
 
     // 借貸整合性チェック
-    const balanceResult = checkSlipBalance(allRows);
+    const balanceResult = checkSlipBalance(allRows, opts.knownMismatches);
     errors.balance = balanceResult.unknown;
 
     // 奉行原本監査
@@ -1257,14 +1265,19 @@ async function executeConversion() {
 function getOptions() {
   const dateFromStr = document.getElementById('opt-date-from').value;
   const dateToStr   = document.getElementById('opt-date-to').value;
+  const knownMismatchesRaw = document.getElementById('opt-known-mismatches').value || '';
+  const knownMismatches = new Set(
+    knownMismatchesRaw.split(',').map(s => s.trim()).filter(s => s.length > 0)
+  );
   return {
     prefix: document.getElementById('opt-prefix').value || 'freee用_仕訳データ_obc変換',
-    rowsPerFile: parseInt(document.getElementById('opt-rows-per-file').value) || 10000,
+    rowsPerFile: Math.max(100, parseInt(document.getElementById('opt-rows-per-file').value) || 10000),
     dateFrom: dateFromStr ? new Date(dateFromStr) : null,
     dateTo:   dateToStr   ? new Date(dateToStr + 'T23:59:59') : null,
     outputPartners: document.getElementById('opt-output-partners').checked,
     partnersPrefix: document.getElementById('opt-partners-prefix').value || 'freee取引先マスタ',
     dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+    knownMismatches,
   };
 }
 
@@ -1682,6 +1695,7 @@ function saveSettings() {
       outputPartners: document.getElementById('opt-output-partners').checked,
       partnersPrefix: document.getElementById('opt-partners-prefix').value,
       dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+      knownMismatches: document.getElementById('opt-known-mismatches').value,
     }));
   } catch(e) {}
 }
@@ -1699,6 +1713,7 @@ function loadSettings() {
     }
     if (s.partnersPrefix) document.getElementById('opt-partners-prefix').value = s.partnersPrefix;
     if (s.dedupStrategy) document.getElementById('opt-dedup-strategy').value = s.dedupStrategy;
+    if (s.knownMismatches != null) document.getElementById('opt-known-mismatches').value = s.knownMismatches;
   } catch(e) {}
 }
 
