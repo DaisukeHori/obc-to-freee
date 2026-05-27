@@ -441,7 +441,7 @@ freee に取り込むと同名の取引先が複数登録される状態にな�
 [エラー] 取引先マスタ CSV の書き出しに失敗しました
 ======================================================================
 出力先: /path/to/output/freee取引先マスタ.csv
-原因: PermissionError: [Errno 13] Permission denied
+原因: PermissionError: [Errno 13] Permission denied: '/path/to/output/freee取引先マスタ.csv'
 
 【ネクストアクション】
   1. 出力先ディレクトリの書き込み権限を確認してください
