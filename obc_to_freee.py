@@ -783,18 +783,41 @@ def find_group_bumon(rows: list) -> str:
 # freee33列リストに変換
 # ---------------------------------------------------------------------------
 
-def to_freee_row(r: dict) -> list:
-    """辞書をfreee33列リストに変換する。"""
+def to_freee_row(r: dict,
+                 code_rewrite_map: dict = None,
+                 name_override_map: dict = None) -> list:
+    """辞書をfreee33列リストに変換する。
+
+    code_rewrite_map: {古コード: 新コード, ...} 統合時に取引先コードを書き換える
+    name_override_map: {コード: 新名前, ...}   別名化時に取引先名を書き換える
+    """
+    dr_code = r["dr_partner_code"]
+    cr_code = r["cr_partner_code"]
+    dr_name = r["dr_partner"]
+    cr_name = r["cr_partner"]
+
+    if code_rewrite_map:
+        if dr_code in code_rewrite_map:
+            dr_code = code_rewrite_map[dr_code]
+        if cr_code in code_rewrite_map:
+            cr_code = code_rewrite_map[cr_code]
+
+    if name_override_map:
+        if dr_code in name_override_map:
+            dr_name = name_override_map[dr_code]
+        if cr_code in name_override_map:
+            cr_name = name_override_map[cr_code]
+
     return [
-        "[明細行]",          # [表題行]
+        "[明細行]",  # [表題行]
         r["date"],           # 日付
         r["slip_no"],        # 伝票番号
         "",                  # 決算整理仕訳
         r["dr_kamoku"],      # 借方勘定科目
         "",                  # 借方科目コード
         r["dr_hojo"],        # 借方補助科目
-        r["dr_partner"],     # 借方取引先
-        r["dr_partner_code"],# 借方取引先コード
+        dr_name,             # 借方取引先
+        dr_code,             # 借方取引先コード
         r["dr_bumon"],       # 借方部門
         "",                  # 借方品目
         "",                  # 借方メモタグ
@@ -807,8 +830,8 @@ def to_freee_row(r: dict) -> list:
         r["cr_kamoku"],      # 貸方勘定科目
         "",                  # 貸方科目コード
         r["cr_hojo"],        # 貸方補助科目
-        r["cr_partner"],     # 貸方取引先
-        r["cr_partner_code"],# 貸方取引先コード
+        cr_name,             # 貸方取引先
+        cr_code,             # 貸方取引先コード
         r["cr_bumon"],       # 貸方部門
         "",                  # 貸方品目
         "",                  # 貸方メモタグ
@@ -943,12 +966,16 @@ def read_obc_csv(filepath: str, date_from=None, date_to=None,
 # グループ処理 (Transformation 1 適用)
 # ---------------------------------------------------------------------------
 
-def process_groups(groups: OrderedDict) -> tuple:
+def process_groups(groups: OrderedDict,
+                   code_rewrite_map: dict = None,
+                   name_override_map: dict = None) -> tuple:
     """
     全グループに複合補完を適用し、(freee33列の行リスト, グループ別行数リスト) を返す。
     グループ別行数リストは [(key, freee行数), ...] の順序付きリスト。
     行分解により1奉行行が2freee行になる場合があるため、
     実際の出力行数を正確に計算する。
+
+    code_rewrite_map / name_override_map が指定された場合は to_freee_row() で適用する。
     """
     all_rows = []
     slip_sizes = []
@@ -957,7 +984,11 @@ def process_groups(groups: OrderedDict) -> tuple:
         group_bumon = find_group_bumon(slip_rows)
         completed, skipped = apply_fukugo(slip_rows, group_bumon)
         total_skipped += skipped
-        freee_rows = [to_freee_row(r) for r in completed]
+        freee_rows = [
+            to_freee_row(r, code_rewrite_map=code_rewrite_map,
+                         name_override_map=name_override_map)
+            for r in completed
+        ]
         all_rows.extend(freee_rows)
         slip_sizes.append((key, len(freee_rows)))
     if total_skipped > 0:
@@ -1199,6 +1230,213 @@ def collect_partners(groups: OrderedDict) -> dict:
         "multi_name_count": len(multi_name_details),
         "multi_name_details": multi_name_details,
     }
+
+
+def _count_usage(code: str, groups: OrderedDict) -> tuple:
+    """仕訳グループ内でのコードの使用件数 (借方, 貸方, 合計) を返す。"""
+    dr_count = 0
+    cr_count = 0
+    for rows in groups.values():
+        for r in rows:
+            if r.get("dr_partner_code", "").strip() == code:
+                dr_count += 1
+            if r.get("cr_partner_code", "").strip() == code:
+                cr_count += 1
+    return dr_count, cr_count, dr_count + cr_count
+
+
+def dedup_partners(
+    partner_data: dict,
+    strategy: str,
+    all_groups: OrderedDict,
+) -> tuple:
+    """
+    同名異コード検出後、strategy に応じて統合 or 別名化 or スキップを実行する。
+
+    strategy:
+        "warn-only"     — 何もしない (従来動作)
+        "interactive"   — 標準入力で 1 件ずつ対処を選択
+        "merge-lowest"  — 最小コードに統合
+        "merge-highest" — 最大コードに統合
+        "merge-most-used" — 最多使用コードに統合
+        "suffix"        — 使用回数少ない方に _2, _3 を付与
+
+    戻り値:
+        (deduped_partner_data, code_rewrite_map, name_override_map, audit_log)
+        - deduped_partner_data: partner_data のコピーで partners を更新済み
+        - code_rewrite_map: {古コード: 新コード} (merge 時のみ)
+        - name_override_map: {コード: 表示名} (suffix 時および merge 時の名前確定)
+        - audit_log: [(name, [old_codes], action_desc, result_desc), ...]
+    """
+    if strategy == "warn-only":
+        return partner_data, {}, {}, []
+
+    partners = dict(partner_data["partners"])  # code -> name のコピー
+
+    # 同名異コードグループを構築
+    name_to_codes: dict = defaultdict(list)
+    for code, name in sorted(partners.items()):  # コード昇順で安定
+        name_to_codes[name].append(code)
+
+    same_name_groups = {
+        name: codes
+        for name, codes in name_to_codes.items()
+        if len(codes) > 1
+    }
+
+    if not same_name_groups:
+        return partner_data, {}, {}, []
+
+    code_rewrite_map: dict = {}
+    name_override_map: dict = {}
+    audit_log: list = []
+    skip_codes: set = set()
+
+    sep = "=" * 70
+    total = len(same_name_groups)
+
+    for idx, (name, codes) in enumerate(sorted(same_name_groups.items()), start=1):
+        # 使用回数を計算
+        usage: dict = {}
+        for code in codes:
+            dr_cnt, cr_cnt, total_cnt = _count_usage(code, all_groups)
+            usage[code] = {"dr": dr_cnt, "cr": cr_cnt, "total": total_cnt}
+
+        old_codes = list(codes)
+
+        if strategy == "interactive":
+            # 対話プロンプト
+            print(sep, file=sys.stderr)
+            print(f"同名異コードの対処 ({idx}/{total})", file=sys.stderr)
+            print(sep, file=sys.stderr)
+            print(f"名前: {name}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("候補コード:", file=sys.stderr)
+            for i, code in enumerate(codes, start=1):
+                u = usage[code]
+                print(f"  ({i}) {code}  (借方 {u['dr']} 回 / 貸方 {u['cr']} 回、仕訳合計 {u['total']} 件で使用)",
+                      file=sys.stderr)
+            print("", file=sys.stderr)
+            print("対処方法を選んでください:", file=sys.stderr)
+            for i, code in enumerate(codes, start=1):
+                other_codes = [c for c in codes if c != code]
+                others_str = " / ".join(other_codes)
+                print(f"  ({i}) コード {code} に統合", file=sys.stderr)
+                print(f"      → 仕訳 CSV の {others_str} を {code} に書き換え", file=sys.stderr)
+                print(f"      → 取引先マスタは「{name} / {code}」1 行のみ", file=sys.stderr)
+            print(f"  (3) 別名化" if len(codes) == 2 else f"  ({len(codes)+1}) 別名化", file=sys.stderr)
+            suffix_opt_num = len(codes) + 1
+            print(f"      → 取引先マスタは {len(codes)} 行: 使用回数多い方が元名、少ない方に _2 等を付与", file=sys.stderr)
+            print(f"      → 仕訳 CSV のコードは変更しない (取引先名のみ書き換え)", file=sys.stderr)
+            print(f"  (s) スキップ (取引先マスタから除外。手動で freee マスタ画面で対処)", file=sys.stderr)
+            print("", file=sys.stderr)
+
+            # 選択肢の番号を整理
+            valid_merge_nums = list(range(1, len(codes) + 1))
+            suffix_num = len(codes) + 1
+
+            while True:
+                try:
+                    choice = input(f"選択 ({', '.join(str(n) for n in valid_merge_nums)}, {suffix_num}, s): ").strip().lower()
+                except EOFError:
+                    choice = "s"
+                if choice in [str(n) for n in valid_merge_nums]:
+                    chosen_idx = int(choice) - 1
+                    adopted_code = codes[chosen_idx]
+                    eliminated = [c for c in codes if c != adopted_code]
+                    for old in eliminated:
+                        code_rewrite_map[old] = adopted_code
+                        if old in partners:
+                            del partners[old]
+                    name_override_map[adopted_code] = name
+                    replaced_total = sum(usage[c]["total"] for c in eliminated)
+                    action = f"({choice}) コード {adopted_code} に統合"
+                    result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
+                    audit_log.append((name, old_codes, action, result))
+                    break
+                elif choice == str(suffix_num):
+                    _apply_suffix(name, codes, usage, partners, name_override_map)
+                    action = f"({suffix_num}) 別名化"
+                    result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
+                    audit_log.append((name, old_codes, action, result))
+                    break
+                elif choice == "s":
+                    for code in codes:
+                        if code in partners:
+                            del partners[code]
+                    action = "(s) スキップ"
+                    result = "マスタから除外、要手動対処"
+                    audit_log.append((name, old_codes, action, result))
+                    break
+                else:
+                    print("不正な選択です。もう一度入力してください: ", end="", flush=True, file=sys.stderr)
+
+        elif strategy in ("merge-lowest", "merge-highest", "merge-most-used"):
+            # 採用コード決定
+            if strategy == "merge-lowest":
+                adopted_code = min(codes)
+            elif strategy == "merge-highest":
+                adopted_code = max(codes)
+            else:  # merge-most-used
+                # 使用回数最多、同数はコード昇順
+                adopted_code = max(codes, key=lambda c: (usage[c]["total"], -int(c) if c.isdigit() else 0))
+                # 同数の場合コード昇順 (小さい方を採用)
+                max_usage = usage[adopted_code]["total"]
+                candidates = [c for c in codes if usage[c]["total"] == max_usage]
+                adopted_code = min(candidates)
+
+            eliminated = [c for c in codes if c != adopted_code]
+            for old in eliminated:
+                code_rewrite_map[old] = adopted_code
+                if old in partners:
+                    del partners[old]
+            name_override_map[adopted_code] = name
+            replaced_total = sum(usage[c]["total"] for c in eliminated)
+            action = f"コード {adopted_code} に統合 ({strategy})"
+            result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
+            audit_log.append((name, old_codes, action, result))
+
+        elif strategy == "suffix":
+            _apply_suffix(name, codes, usage, partners, name_override_map)
+            action = "別名化 (suffix)"
+            result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
+            audit_log.append((name, old_codes, action, result))
+
+    # deduped_partner_data を構築
+    deduped = dict(partner_data)
+    deduped["partners"] = partners
+    return deduped, code_rewrite_map, name_override_map, audit_log
+
+
+def _apply_suffix(name: str, codes: list, usage: dict, partners: dict, name_override_map: dict):
+    """suffix 戦略: 使用回数が多い方を 1 番目 (元名)、少ない方を _2, _3 に。"""
+    # 使用回数降順、同数はコード昇順で並び替え
+    sorted_codes = sorted(codes, key=lambda c: (-usage[c]["total"], c))
+    for rank, code in enumerate(sorted_codes):
+        if rank == 0:
+            display_name = name
+        else:
+            display_name = f"{name}_{rank + 1}"
+        name_override_map[code] = display_name
+        partners[code] = display_name
+
+
+def print_dedup_audit(strategy: str, audit_log: list, partners: dict):
+    """同名異コード対処結果を stderr に出力する。"""
+    sep = "=" * 70
+    print(sep, file=sys.stderr)
+    print(f"[同名異コード対処結果] dedup-strategy={strategy}", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print(f"処理した同名異コード: {len(audit_log)} 件", file=sys.stderr)
+    print("", file=sys.stderr)
+    for (name, old_codes, action, result) in audit_log:
+        print(f"  {name}:", file=sys.stderr)
+        print(f"    元: コード {' / '.join(old_codes)}", file=sys.stderr)
+        print(f"    選択: {action}", file=sys.stderr)
+        print(f"    結果: {result}", file=sys.stderr)
+        print("", file=sys.stderr)
+    print(f"最終取引先マスタ件数: {len(partners)} 件", file=sys.stderr)
+    print(sep, file=sys.stderr)
 
 
 def write_partners_csv(
@@ -1516,6 +1754,20 @@ def main():
         default="freee取引先マスタ",
         help="取引先マスタファイル名のプレフィックス (デフォルト: freee取引先マスタ)",
     )
+    parser.add_argument(
+        "--dedup-strategy",
+        dest="dedup_strategy",
+        choices=["warn-only", "interactive", "merge-lowest", "merge-highest",
+                 "merge-most-used", "suffix"],
+        default="warn-only",
+        help=(
+            "同名異コード検出時の対処戦略 (デフォルト: warn-only)。"
+            "--output-partners 指定時のみ有効。"
+            "warn-only=警告のみ / interactive=対話選択 / "
+            "merge-lowest=最小コードに統合 / merge-highest=最大コードに統合 / "
+            "merge-most-used=最多使用コードに統合 / suffix=別名化(_2,_3を付与)"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -1542,8 +1794,27 @@ def main():
     print(f"合計入力行数 (期間フィルタ後): {total_input}")
     print(f"伝票グループ数: {len(all_groups)}")
 
+    # 取引先 dedup 処理 (--output-partners かつ warn-only 以外のとき仕訳 CSV 書き出し前に実行)
+    code_rewrite_map: dict = {}
+    name_override_map: dict = {}
+    dedup_audit_log: list = []
+    deduped_partner_data = None
+
+    if args.output_partners:
+        raw_partner_data = collect_partners(all_groups)
+        deduped_partner_data, code_rewrite_map, name_override_map, dedup_audit_log = dedup_partners(
+            raw_partner_data,
+            args.dedup_strategy,
+            all_groups,
+        )
+
     # 全グループ変換 (process_groups は (all_rows, slip_sizes) を返す)
-    all_rows, slip_sizes = process_groups(all_groups)
+    # dedup 後の code_rewrite_map / name_override_map を仕訳行に反映する
+    all_rows, slip_sizes = process_groups(
+        all_groups,
+        code_rewrite_map=code_rewrite_map if code_rewrite_map else None,
+        name_override_map=name_override_map if name_override_map else None,
+    )
     print(f"出力行数: {len(all_rows)}")
 
     # 伝票単位借貸整合性チェック (ファイル書き出し前)
@@ -1568,14 +1839,16 @@ def main():
 
     # 取引先マスタ CSV 出力 (--output-partners 指定時)
     if args.output_partners:
-        partner_data = collect_partners(all_groups)
+        # dedup 監査ログ出力 (warn-only 以外で処理あり)
+        if args.dedup_strategy != "warn-only" and dedup_audit_log:
+            print_dedup_audit(args.dedup_strategy, dedup_audit_log, deduped_partner_data["partners"])
         partner_path, partner_count = write_partners_csv(
-            partner_data,
+            deduped_partner_data,
             args.output_dir,
             args.partners_prefix,
         )
         print(f"\n取引先マスタ: {partner_path}  ({partner_count} 件)")
-        print_partner_warnings(partner_data)
+        print_partner_warnings(deduped_partner_data)
 
     # 奉行原本監査ログ (stderr)
     audit_obc_source(args.input, date_from, date_to,
