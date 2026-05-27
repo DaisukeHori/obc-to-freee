@@ -43,6 +43,68 @@ FREEE_HEADER = [
 ]
 assert len(FREEE_HEADER) == 33, f"ヘッダー列数が不正: {len(FREEE_HEADER)}"
 
+# freee 取引先インポート用テンプレート 57 列ヘッダー (公式テンプレートと完全一致)
+FREEE_PARTNER_HEADER = [
+    "名前（通称）",
+    "取引先コード",
+    "ショートカット1",
+    "ショートカット2",
+    "正式名称（帳票出力時に使用される名称）",
+    "カナ名称",
+    "敬称",
+    "事業所種別",
+    "地域",
+    "郵便番号",
+    "都道府県",
+    "市区町村・番地",
+    "建物名・部屋番号など",
+    "電話番号",
+    "営業担当者名",
+    "営業担当者メールアドレス",
+    "請求書送付方法",
+    "入力候補",
+    "銀行名",
+    "銀行名（カナ）",
+    "銀行番号",
+    "支店名",
+    "支店名（カナ）",
+    "支店番号",
+    "口座種別",
+    "口座番号",
+    "受取人名",
+    "受取人名（カナ）",
+    "締め日(支払期日設定)",
+    "支払月(支払期日設定)",
+    "支払日(支払期日設定)",
+    "締め日(入金期日設定)",
+    "入金月(入金期日設定)",
+    "入金日(入金期日設定)",
+    "手数料負担",
+    "振込元口座",
+    "適格請求書発行事業者（該当する/該当しない）",
+    "適格請求書発行事業者の登録番号",
+    "取引先担当者敬称",
+    "取引先担当者部署",
+    "顧客として利用する",
+    "見込顧客として利用する",
+    "請求先として利用する",
+    "入金元として利用する",
+    "仕入先として利用する",
+    "支払先として利用する",
+    "外税/内税",
+    "締め日(請求期日設定)",
+    "請求予定月(請求期日設定)",
+    "請求予定日(請求期日設定)",
+    "入金方法",
+    "振込手数料負担区分(請求)",
+    "支払方法",
+    "帳票共有ポータル",
+    "従業員として利用する",
+    "販売設定の送付先として利用する",
+    "調達設定の送付先として利用する",
+]
+assert len(FREEE_PARTNER_HEADER) == 57, f"取引先ヘッダー列数が不正: {len(FREEE_PARTNER_HEADER)}"
+
 # 奉行の税区分略称 + 税率 → freee の税区分コード
 # キー: (税区分略称.strip(), 税率.strip())
 # 税率が空・"0" のケースも含む
@@ -1036,6 +1098,176 @@ def write_output(
 
 
 # ---------------------------------------------------------------------------
+# 取引先マスタ収集・出力
+# ---------------------------------------------------------------------------
+
+def collect_partners(groups: OrderedDict) -> dict:
+    """
+    変換済みグループから取引先 (コード, 名前) のユニークリストを収集する。
+
+    戻り値:
+        {
+          "partners": {code: name, ...},  # 最終採用コード→名前
+          "dr_only": set(codes),          # 借方にのみ出現
+          "cr_only": set(codes),          # 貸方にのみ出現
+          "both": set(codes),             # 両側に出現
+          "noise_count": int,             # ノイズ除去件数
+          "multi_name_count": int,        # 同コード異名検出件数
+          "multi_name_details": [         # 同コード異名詳細
+              {"code": ..., "candidates": [(name, count), ...], "adopted": ...}, ...
+          ],
+        }
+    """
+    # code -> {name: count}
+    dr_map: dict = defaultdict(lambda: defaultdict(int))
+    cr_map: dict = defaultdict(lambda: defaultdict(int))
+    noise_count = 0
+
+    for key, rows in groups.items():
+        for r in rows:
+            # 借方
+            dr_code_raw = r.get("dr_partner_code", "")
+            dr_name_raw = r.get("dr_partner", "")
+            dr_code = dr_code_raw.strip()
+            dr_name = dr_name_raw.strip()
+
+            if dr_code and dr_code != "000000" and dr_name and dr_name != "その他取引先":
+                dr_map[dr_code][dr_name] += 1
+            elif dr_code or dr_name:
+                # 片方だけ有効 → ノイズ
+                noise_count += 1
+
+            # 貸方
+            cr_code_raw = r.get("cr_partner_code", "")
+            cr_name_raw = r.get("cr_partner", "")
+            cr_code = cr_code_raw.strip()
+            cr_name = cr_name_raw.strip()
+
+            if cr_code and cr_code != "000000" and cr_name and cr_name != "その他取引先":
+                cr_map[cr_code][cr_name] += 1
+            elif cr_code or cr_name:
+                noise_count += 1
+
+    # 全コードをマージ (借方 + 貸方)
+    all_codes = set(dr_map.keys()) | set(cr_map.keys())
+    dr_codes = set(dr_map.keys())
+    cr_codes = set(cr_map.keys())
+    dr_only = dr_codes - cr_codes
+    cr_only = cr_codes - dr_codes
+    both = dr_codes & cr_codes
+
+    merged: dict = defaultdict(lambda: defaultdict(int))
+    for code, names in dr_map.items():
+        for name, cnt in names.items():
+            merged[code][name] += cnt
+    for code, names in cr_map.items():
+        for name, cnt in names.items():
+            merged[code][name] += cnt
+
+    # 同コード異名検出・最頻名採用
+    partners = {}
+    multi_name_details = []
+
+    for code in sorted(all_codes):
+        name_counts = merged[code]
+        if len(name_counts) == 1:
+            partners[code] = list(name_counts.keys())[0]
+        else:
+            # 最頻値採用
+            sorted_names = sorted(name_counts.items(), key=lambda x: x[1], reverse=True)
+            adopted = sorted_names[0][0]
+            partners[code] = adopted
+            multi_name_details.append({
+                "code": code,
+                "candidates": sorted_names,
+                "adopted": adopted,
+            })
+
+    return {
+        "partners": partners,
+        "dr_only": dr_only,
+        "cr_only": cr_only,
+        "both": both,
+        "noise_count": noise_count,
+        "multi_name_count": len(multi_name_details),
+        "multi_name_details": multi_name_details,
+    }
+
+
+def write_partners_csv(
+    partner_data: dict,
+    output_dir: str,
+    partners_prefix: str,
+):
+    """
+    取引先マスタ CSV を UTF-8 BOM 付きで書き出す。
+    出力ファイル: {output_dir}/{partners_prefix}.csv
+    列構成: freee 取引先インポートテンプレート 57 列
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    outpath = os.path.join(output_dir, f"{partners_prefix}.csv")
+
+    partners = partner_data["partners"]
+    # 取引先コード昇順ソート
+    sorted_codes = sorted(partners.keys())
+
+    with open(outpath, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(FREEE_PARTNER_HEADER)
+        for code in sorted_codes:
+            name = partners[code]
+            row = [""] * len(FREEE_PARTNER_HEADER)
+            row[0] = name    # 名前（通称）
+            row[1] = code    # 取引先コード
+            row[4] = name    # 正式名称（帳票出力時に使用される名称）
+            writer.writerow(row)
+
+    return outpath, len(sorted_codes)
+
+
+def print_partner_warnings(partner_data: dict):
+    """
+    同コード異名検出警告 + 取引先マスタ抽出件数サマリを stderr に出力する。
+    """
+    sep = "=" * 70
+    details = partner_data["multi_name_details"]
+
+    if details:
+        print(sep, file=sys.stderr)
+        print("[要確認 取引先マスタ] 同一コードに複数の名前が見つかった取引先", file=sys.stderr)
+        print(sep, file=sys.stderr)
+        print("以下の取引先は奉行原本で同一コードに複数の表記が含まれていました。", file=sys.stderr)
+        print("最頻名を採用しましたが、freee 取り込み前に経理担当の確認推奨。", file=sys.stderr)
+        print("", file=sys.stderr)
+        for d in details:
+            parts = " / ".join(
+                f"'{name}' ({cnt} 件)" for name, cnt in d["candidates"]
+            )
+            print(f"  コード {d['code']}: {parts} → '{d['adopted']}' を採用", file=sys.stderr)
+        print(f"\n  合計 {len(details)} 件", file=sys.stderr)
+        print(sep, file=sys.stderr)
+
+    # 抽出件数サマリ
+    partners = partner_data["partners"]
+    dr_only = partner_data["dr_only"]
+    cr_only = partner_data["cr_only"]
+    both = partner_data["both"]
+    noise = partner_data["noise_count"]
+    multi = partner_data["multi_name_count"]
+
+    print(sep, file=sys.stderr)
+    print(f"[取引先マスタ] 抽出件数: {len(partners)} 件", file=sys.stderr)
+    print(f"  - 借方側出現: {len(dr_only | both)} 件", file=sys.stderr)
+    print(f"  - 貸方側出現: {len(cr_only | both)} 件", file=sys.stderr)
+    print(f"  - 両側出現:   {len(both)} 件", file=sys.stderr)
+    print(f"  - ノイズ除去: {noise} 件 (000000/その他取引先/空白)", file=sys.stderr)
+    print(f"  - 同コード異名検出: {multi} 件"
+          + (" (上記 [要確認 取引先マスタ] ログ参照)" if multi > 0 else ""),
+          file=sys.stderr)
+    print(sep, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # 奉行原本監査 (stderr 出力)
 # ---------------------------------------------------------------------------
 
@@ -1215,6 +1447,17 @@ def main():
         default="auto",
         help="奉行 CSV のエンコーディング (デフォルト: 自動判定)",
     )
+    parser.add_argument(
+        "--output-partners",
+        action="store_true",
+        default=False,
+        help="取引先マスタ CSV を追加出力する (デフォルト: OFF)",
+    )
+    parser.add_argument(
+        "--partners-prefix",
+        default="freee取引先マスタ",
+        help="取引先マスタファイル名のプレフィックス (デフォルト: freee取引先マスタ)",
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -1264,6 +1507,17 @@ def main():
     print(f"\n完了: {len(written)} ファイル出力")
     for path, count in written:
         print(f"  {path}  ({count} データ行 + 1 ヘッダー行)")
+
+    # 取引先マスタ CSV 出力 (--output-partners 指定時)
+    if args.output_partners:
+        partner_data = collect_partners(all_groups)
+        partner_path, partner_count = write_partners_csv(
+            partner_data,
+            args.output_dir,
+            args.partners_prefix,
+        )
+        print(f"\n取引先マスタ: {partner_path}  ({partner_count} 件)")
+        print_partner_warnings(partner_data)
 
     # 奉行原本監査ログ (stderr)
     audit_obc_source(args.input, date_from, date_to,
