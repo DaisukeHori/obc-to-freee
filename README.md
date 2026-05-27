@@ -466,6 +466,8 @@ UTF-8 with BOM (`EF BB BF`)、全データ行は `[明細行]` で開始、各�
 
 > 注: 税率 `0` または空欄の場合は `対象外` として処理。想定外の組み合わせは「対象外」で仮置きしてエラーレポートに一覧表示。
 
+> ⚠️ **保守時の注意 (開発者向け)**: 税区分マッピング (`TAX_MAP`) は **Python 版 `obc_to_freee.py` が正本**ですが、JavaScript 単独版 `obc_to_freee.html` (および GitHub Pages 上の `index.html`) にも独立した `TAX_MAP` 定数が存在します。`FREEE_HEADER` / `FREEE_PARTNER_HEADER` / `REQUIRED_COLS` / `OPTIONAL_COLS` も同様です。これらを変更する際は **両方を同期更新**してください。同期漏れがあると Python 版と JS 版で異なる出力結果になります。
+
 ### 11-5. ノイズ除去
 
 - 取引先名 = `その他取引先` または空白のみ → 空欄
