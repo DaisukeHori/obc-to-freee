@@ -1117,6 +1117,13 @@ def collect_partners(groups: OrderedDict) -> dict:
               {"code": ..., "candidates": [(name, count), ...], "adopted": ...}, ...
           ],
         }
+
+    同コード異名検出:
+    - 同一取引先コードに対して複数の取引先名が出現した場合、
+      出現回数最多 (最頻) の名前を採用する。
+    - 出現回数が同数 (tie) の場合は、奉行原本の **出現順 (上のファイルから順、各ファイル内は行番号順) で最初に登場した名前** を採用する
+      (Python defaultdict の挿入順序保持に依存する仕様)。
+    - tie ケースが発生した取引先は stderr の [要確認 取引先マスタ A] セクションに全候補が列挙されるため、経理担当が手動で確認可能。
     """
     # code -> {name: count}
     dr_map: dict = defaultdict(lambda: defaultdict(int))
@@ -1204,37 +1211,53 @@ def write_partners_csv(
     出力ファイル: {output_dir}/{partners_prefix}.csv
     列構成: freee 取引先インポートテンプレート 57 列
     """
-    os.makedirs(output_dir, exist_ok=True)
     outpath = os.path.join(output_dir, f"{partners_prefix}.csv")
 
     partners = partner_data["partners"]
     # 取引先コード昇順ソート
     sorted_codes = sorted(partners.keys())
 
-    with open(outpath, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(FREEE_PARTNER_HEADER)
-        for code in sorted_codes:
-            name = partners[code]
-            row = [""] * len(FREEE_PARTNER_HEADER)
-            row[0] = name    # 名前（通称）
-            row[1] = code    # 取引先コード
-            row[4] = name    # 正式名称（帳票出力時に使用される名称）
-            writer.writerow(row)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(outpath, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(FREEE_PARTNER_HEADER)
+            for code in sorted_codes:
+                name = partners[code]
+                row = [""] * len(FREEE_PARTNER_HEADER)
+                row[0] = name    # 名前（通称）
+                row[1] = code    # 取引先コード
+                row[4] = name    # 正式名称（帳票出力時に使用される名称）
+                writer.writerow(row)
+    except (PermissionError, OSError) as e:
+        print("=" * 70, file=sys.stderr)
+        print("[エラー] 取引先マスタ CSV の書き出しに失敗しました", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        print(f"出力先: {outpath}", file=sys.stderr)
+        print(f"原因: {type(e).__name__}: {e}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("【ネクストアクション】", file=sys.stderr)
+        print("  1. 出力先ディレクトリの書き込み権限を確認してください", file=sys.stderr)
+        print("  2. ディスク残量を確認してください", file=sys.stderr)
+        print("  3. 他のプロセスがファイルを開いていないか確認してください", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        sys.exit(1)
 
     return outpath, len(sorted_codes)
 
 
 def print_partner_warnings(partner_data: dict):
     """
-    同コード異名検出警告 + 取引先マスタ抽出件数サマリを stderr に出力する。
+    同コード異名検出警告 + 同名異コード検出警告 + 取引先マスタ抽出件数サマリを stderr に出力する。
+    2つの警告セクションは独立して評価・出力される (片方が出ても他方は抑制されない)。
     """
     sep = "=" * 70
     details = partner_data["multi_name_details"]
 
+    # --- [要確認 取引先マスタ A] 同コード異名 ---
     if details:
         print(sep, file=sys.stderr)
-        print("[要確認 取引先マスタ] 同一コードに複数の名前が見つかった取引先", file=sys.stderr)
+        print("[要確認 取引先マスタ A] 同一コードに複数の名前が見つかった取引先", file=sys.stderr)
         print(sep, file=sys.stderr)
         print("以下の取引先は奉行原本で同一コードに複数の表記が含まれていました。", file=sys.stderr)
         print("最頻名を採用しましたが、freee 取り込み前に経理担当の確認推奨。", file=sys.stderr)
@@ -1246,9 +1269,41 @@ def print_partner_warnings(partner_data: dict):
             print(f"  コード {d['code']}: {parts} → '{d['adopted']}' を採用", file=sys.stderr)
         print(f"\n  合計 {len(details)} 件", file=sys.stderr)
         print(sep, file=sys.stderr)
+        print("", file=sys.stderr)
+
+    # --- [要確認 取引先マスタ B] 同名異コード ---
+    partners = partner_data["partners"]
+    # 採用名 → コード集合 のマップを構築
+    name_to_codes: dict = defaultdict(set)
+    for code, name in partners.items():
+        name_to_codes[name].add(code)
+
+    same_name_diff_codes = {
+        name: sorted(codes)
+        for name, codes in name_to_codes.items()
+        if len(codes) > 1
+    }
+
+    if same_name_diff_codes:
+        print(sep, file=sys.stderr)
+        print(
+            f"[要確認 取引先マスタ B] 同一名に複数のコードが見つかった取引先 (合計 {len(same_name_diff_codes)} 件)",
+            file=sys.stderr,
+        )
+        print(sep, file=sys.stderr)
+        print("以下の取引先は同じ名前で複数のコードを持っています。", file=sys.stderr)
+        print("freee に取り込むと同名の取引先が複数登録される状態になります。", file=sys.stderr)
+        print("奉行原本側で名寄せを行うか、freee 取り込み後に手動で統合してください。", file=sys.stderr)
+        print("", file=sys.stderr)
+        for name, codes in sorted(same_name_diff_codes.items()):
+            codes_str = " / ".join(codes)
+            print(f"  名前 '{name}': コード {codes_str}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(f"  合計 {len(same_name_diff_codes)} 件", file=sys.stderr)
+        print(sep, file=sys.stderr)
+        print("", file=sys.stderr)
 
     # 抽出件数サマリ
-    partners = partner_data["partners"]
     dr_only = partner_data["dr_only"]
     cr_only = partner_data["cr_only"]
     both = partner_data["both"]
@@ -1262,7 +1317,10 @@ def print_partner_warnings(partner_data: dict):
     print(f"  - 両側出現:   {len(both)} 件", file=sys.stderr)
     print(f"  - ノイズ除去: {noise} 件 (000000/その他取引先/空白)", file=sys.stderr)
     print(f"  - 同コード異名検出: {multi} 件"
-          + (" (上記 [要確認 取引先マスタ] ログ参照)" if multi > 0 else ""),
+          + (" (上記 [要確認 取引先マスタ A] ログ参照)" if multi > 0 else ""),
+          file=sys.stderr)
+    print(f"  - 同名異コード検出: {len(same_name_diff_codes)} 件"
+          + (" (上記 [要確認 取引先マスタ B] ログ参照)" if same_name_diff_codes else ""),
           file=sys.stderr)
     print(sep, file=sys.stderr)
 
