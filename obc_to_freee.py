@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -1249,6 +1250,7 @@ def dedup_partners(
     partner_data: dict,
     strategy: str,
     all_groups: OrderedDict,
+    custom_choices: dict = None,
 ) -> tuple:
     """
     同名異コード検出後、strategy に応じて統合 or 別名化 or スキップを実行する。
@@ -1260,6 +1262,16 @@ def dedup_partners(
         "merge-highest" — 最大コードに統合
         "merge-most-used" — 最多使用コードに統合
         "suffix"        — 使用回数少ない方に _2, _3 を付与
+        "custom"        — custom_choices dict で各取引先の対処を指定
+
+    custom_choices フォーマット (strategy="custom" 時):
+        {
+            "取引先名": {
+                "action": "merge" | "rename" | "skip",
+                "target_code": "742001"  # action="merge" の場合のみ
+            },
+            ...
+        }
 
     戻り値:
         (deduped_partner_data, code_rewrite_map, name_override_map, audit_log)
@@ -1401,6 +1413,62 @@ def dedup_partners(
             action = "別名化 (suffix)"
             result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
             audit_log.append((name, old_codes, action, result))
+
+        elif strategy == "custom":
+            choice_entry = (custom_choices or {}).get(name, {})
+            c_action = choice_entry.get("action", "merge-most-used")  # デフォルト: merge-most-used
+
+            if c_action == "merge":
+                target_code = choice_entry.get("target_code", "")
+                if target_code and target_code in codes:
+                    adopted_code = target_code
+                else:
+                    # target_code 未指定 or 不正 → 最多使用コードにフォールバック
+                    adopted_code = max(codes, key=lambda c: (usage[c]["total"], -int(c) if c.isdigit() else 0))
+                    max_usage = usage[adopted_code]["total"]
+                    candidates = [c for c in codes if usage[c]["total"] == max_usage]
+                    adopted_code = min(candidates)
+                eliminated = [c for c in codes if c != adopted_code]
+                for old in eliminated:
+                    code_rewrite_map[old] = adopted_code
+                    if old in partners:
+                        del partners[old]
+                name_override_map[adopted_code] = name
+                replaced_total = sum(usage[c]["total"] for c in eliminated)
+                action = f"コード {adopted_code} に統合 (custom)"
+                result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
+                audit_log.append((name, old_codes, action, result))
+
+            elif c_action == "rename":
+                _apply_suffix(name, codes, usage, partners, name_override_map)
+                action = "別名化 (custom/rename)"
+                result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
+                audit_log.append((name, old_codes, action, result))
+
+            elif c_action == "skip":
+                for code in codes:
+                    if code in partners:
+                        del partners[code]
+                action = "スキップ (custom)"
+                result = "マスタから除外"
+                audit_log.append((name, old_codes, action, result))
+
+            else:
+                # 未知の action → merge-most-used 相当でフォールバック
+                adopted_code = max(codes, key=lambda c: (usage[c]["total"], -int(c) if c.isdigit() else 0))
+                max_usage = usage[adopted_code]["total"]
+                candidates = [c for c in codes if usage[c]["total"] == max_usage]
+                adopted_code = min(candidates)
+                eliminated = [c for c in codes if c != adopted_code]
+                for old in eliminated:
+                    code_rewrite_map[old] = adopted_code
+                    if old in partners:
+                        del partners[old]
+                name_override_map[adopted_code] = name
+                replaced_total = sum(usage[c]["total"] for c in eliminated)
+                action = f"コード {adopted_code} に統合 (custom/fallback)"
+                result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
+                audit_log.append((name, old_codes, action, result))
 
     # deduped_partner_data を構築
     deduped = dict(partner_data)
@@ -1758,14 +1826,34 @@ def main():
         "--dedup-strategy",
         dest="dedup_strategy",
         choices=["warn-only", "interactive", "merge-lowest", "merge-highest",
-                 "merge-most-used", "suffix"],
+                 "merge-most-used", "suffix", "custom"],
         default="warn-only",
         help=(
             "同名異コード検出時の対処戦略 (デフォルト: warn-only)。"
             "--output-partners 指定時のみ有効。"
             "warn-only=警告のみ / interactive=対話選択 / "
             "merge-lowest=最小コードに統合 / merge-highest=最大コードに統合 / "
-            "merge-most-used=最多使用コードに統合 / suffix=別名化(_2,_3を付与)"
+            "merge-most-used=最多使用コードに統合 / suffix=別名化(_2,_3を付与) / "
+            "custom=--dedup-custom-json で指定した JSON に従って各取引先を処理"
+        ),
+    )
+    parser.add_argument(
+        "--dedup-custom-json",
+        dest="dedup_custom_json",
+        default=None,
+        help=(
+            "--dedup-strategy=custom 時のカスタム選択 JSON ファイルパス。"
+            'フォーマット: {"取引先名": {"action": "merge"|"rename"|"skip", "target_code": "742001"}, ...}'
+        ),
+    )
+    parser.add_argument(
+        "--detect-duplicates-only",
+        dest="detect_duplicates_only",
+        action="store_true",
+        default=False,
+        help=(
+            "同名異コードを検出して JSON 形式で stdout に出力し、変換は行わない。"
+            "GUI の対話フロー Phase 1 で使用。--output-partners は不要。"
         ),
     )
     args = parser.parse_args()
@@ -1794,6 +1882,33 @@ def main():
     print(f"合計入力行数 (期間フィルタ後): {total_input}")
     print(f"伝票グループ数: {len(all_groups)}")
 
+    # --detect-duplicates-only モード: 同名異コード検出して JSON 出力して終了
+    if args.detect_duplicates_only:
+        raw_partner_data = collect_partners(all_groups)
+        partners = raw_partner_data["partners"]
+        name_to_codes: dict = defaultdict(list)
+        for code, name in sorted(partners.items()):
+            name_to_codes[name].append(code)
+        same_name_groups = {
+            name: codes
+            for name, codes in name_to_codes.items()
+            if len(codes) > 1
+        }
+        duplicates = []
+        for name, codes in sorted(same_name_groups.items()):
+            codes_info = []
+            for code in codes:
+                dr_cnt, cr_cnt, total_cnt = _count_usage(code, all_groups)
+                codes_info.append({
+                    "code": code,
+                    "usageCount": total_cnt,
+                    "debitUsage": dr_cnt,
+                    "creditUsage": cr_cnt,
+                })
+            duplicates.append({"name": name, "codes": codes_info})
+        print(json.dumps({"success": True, "duplicates": duplicates}, ensure_ascii=False, indent=2))
+        return
+
     # 取引先 dedup 処理 (--output-partners かつ warn-only 以外のとき仕訳 CSV 書き出し前に実行)
     code_rewrite_map: dict = {}
     name_override_map: dict = {}
@@ -1802,10 +1917,21 @@ def main():
 
     if args.output_partners:
         raw_partner_data = collect_partners(all_groups)
+        # custom 戦略の場合は JSON 読み込み
+        custom_choices = None
+        if args.dedup_strategy == "custom" and args.dedup_custom_json:
+            try:
+                with open(args.dedup_custom_json, "r", encoding="utf-8") as _f:
+                    custom_choices = json.load(_f)
+                print(f"[dedup] custom 選択 JSON 読み込み: {args.dedup_custom_json} ({len(custom_choices)} 件)")
+            except Exception as e:
+                print(f"[dedup] custom JSON 読み込み失敗: {e} — merge-most-used にフォールバック", file=sys.stderr)
+                args.dedup_strategy = "merge-most-used"
         deduped_partner_data, code_rewrite_map, name_override_map, dedup_audit_log = dedup_partners(
             raw_partner_data,
             args.dedup_strategy,
             all_groups,
+            custom_choices=custom_choices,
         )
 
     # 全グループ変換 (process_groups は (all_rows, slip_sizes) を返す)

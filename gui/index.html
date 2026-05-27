@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>obc_to_freee — 勘定奉行 → freee 仕訳インポート変換ツール</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="header-title">
+        <svg class="icon-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span>obc_to_freee</span>
+        <span class="header-subtitle">勘定奉行 → freee 仕訳インポート変換ツール</span>
+      </div>
+      <div class="header-actions">
+        <a href="#history-section" class="btn btn-ghost">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
+          </svg>
+          実行ヒストリ
+        </a>
+        <button id="btn-shutdown" class="btn btn-danger-outline">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>
+          </svg>
+          サーバー停止
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <!-- Step indicator -->
+    <div class="step-indicator" id="step-indicator">
+      <div class="step-item active" data-step="1">
+        <div class="step-circle">1</div>
+        <span class="step-label">CSVを選択</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="2">
+        <div class="step-circle">2</div>
+        <span class="step-label">変換オプション</span>
+      </div>
+      <div class="step-connector"></div>
+      <div class="step-item" data-step="3">
+        <div class="step-circle">3</div>
+        <span class="step-label">実行結果</span>
+      </div>
+    </div>
+
+    <!-- Step 1: File selection -->
+    <div id="step-1" class="step-panel">
+      <div class="card">
+        <h2 class="card-title">奉行 CSV を選択</h2>
+        <div id="dropzone" class="dropzone">
+          <div class="dropzone-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M7 16a4 4 0 0 1-.88-7.903A5 5 0 1 1 15.9 6L16 6a5 5 0 0 1 1 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            </svg>
+          </div>
+          <p class="dropzone-main">ここにCSVファイルをドラッグ&ドロップ</p>
+          <p class="dropzone-sub">または</p>
+          <button type="button" class="btn btn-primary" id="btn-browse">ファイルを選択</button>
+          <p class="dropzone-hint">複数ファイル選択可 (.csv)</p>
+          <input type="file" id="file-input" multiple accept=".csv,text/csv" style="display:none">
+        </div>
+
+        <div id="file-list" class="file-list" style="display:none">
+          <h3 class="file-list-title">選択されたファイル</h3>
+          <ul id="file-list-ul"></ul>
+        </div>
+
+        <div class="step-actions">
+          <button id="btn-step1-next" class="btn btn-primary btn-lg" disabled>
+            次へ →
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Options -->
+    <div id="step-2" class="step-panel" style="display:none">
+      <div class="card">
+        <h2 class="card-title">変換オプション</h2>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="output-prefix">出力ファイル名プレフィックス</label>
+            <input type="text" id="output-prefix" class="form-control" value="freee用_仕訳データ_obc変換">
+          </div>
+          <div class="form-group">
+            <label for="rows-per-file">1ファイルあたりの最大行数</label>
+            <input type="number" id="rows-per-file" class="form-control" value="10000" min="100" max="100000" step="100">
+          </div>
+
+          <div class="form-group form-group-full">
+            <label>期間カット (任意)</label>
+            <div class="date-range">
+              <div class="date-range-inputs">
+                <input type="date" id="date-from" class="form-control">
+                <span class="date-range-sep">〜</span>
+                <input type="date" id="date-to" class="form-control">
+              </div>
+              <label class="checkbox-label">
+                <input type="checkbox" id="all-period">
+                <span>全期間 (日付指定なし)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group form-group-full">
+            <label class="checkbox-label">
+              <input type="checkbox" id="output-partners">
+              <span>取引先マスタも生成する</span>
+            </label>
+          </div>
+
+          <div id="partners-prefix-group" class="form-group form-group-full" style="display:none">
+            <label for="partners-prefix">取引先マスタ ファイル名プレフィックス</label>
+            <input type="text" id="partners-prefix" class="form-control" value="freee取引先マスタ">
+          </div>
+
+          <div class="form-group">
+            <label for="encoding">奉行 CSV エンコーディング</label>
+            <select id="encoding" class="form-control">
+              <option value="auto">auto (自動判定)</option>
+              <option value="cp932">cp932 (Shift-JIS)</option>
+              <option value="utf-8">utf-8</option>
+              <option value="utf-8-sig">utf-8-sig (BOM付き)</option>
+            </select>
+          </div>
+
+          <div class="form-group form-group-full" id="dedup-strategy-group" style="display:none">
+            <label for="dedup-strategy">同名異コード対処方法</label>
+            <select id="dedup-strategy" class="form-control">
+              <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
+              <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
+              <option value="merge-lowest">自動: 最小コードに統合</option>
+              <option value="merge-highest">自動: 最大コードに統合</option>
+              <option value="warn-only">自動: 警告のみ (何も変更しない)</option>
+              <option value="custom">対話: 1 件ずつ選ぶ</option>
+            </select>
+            <p class="form-hint">※ 「取引先マスタも生成する」を有効にした場合のみ機能します</p>
+          </div>
+        </div>
+
+        <div class="step-actions step-actions-split">
+          <div class="step-actions-left">
+            <button id="btn-step2-back" class="btn btn-ghost">← 戻る</button>
+          </div>
+          <div class="step-actions-right">
+            <button id="btn-save-settings" class="btn btn-ghost">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+              </svg>
+              設定を保存
+            </button>
+            <button id="btn-execute" class="btn btn-primary btn-lg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5 3 19 12 5 21 5 3"/>
+              </svg>
+              変換実行
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: Result -->
+    <div id="step-3" class="step-panel" style="display:none">
+      <!-- Loading state -->
+      <div id="result-loading" class="card loading-card" style="display:none">
+        <div class="spinner"></div>
+        <p class="loading-text">変換中...</p>
+        <p class="loading-sub">しばらくお待ちください</p>
+      </div>
+
+      <!-- Success state -->
+      <div id="result-success" style="display:none">
+        <div class="card summary-card">
+          <h2 class="card-title">
+            <svg class="icon-success" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+              <polyline points="22 4 12 14.01 9 11.01"/>
+            </svg>
+            変換完了
+          </h2>
+          <div class="summary-grid" id="summary-grid"></div>
+        </div>
+
+        <div class="card">
+          <h3 class="card-subtitle">出力ファイル一覧</h3>
+          <table class="output-table" id="output-table">
+            <thead>
+              <tr>
+                <th>ファイル名</th>
+                <th>種別</th>
+                <th>行数</th>
+                <th>サイズ</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="output-table-body"></tbody>
+          </table>
+        </div>
+
+        <div id="audit-section"></div>
+
+        <div class="card collapsible-card">
+          <div class="collapsible-header" data-target="freee-steps" data-default-open="true">
+            <h3 class="card-subtitle">freee へのアップロード手順</h3>
+            <svg class="chevron open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="18 15 12 9 6 15"/>
+            </svg>
+          </div>
+          <div id="freee-steps" class="collapsible-body">
+            <div class="upload-steps">
+              <div class="upload-step-item" id="step-partners-upload" style="display:none">
+                <div class="upload-step-number">1</div>
+                <div class="upload-step-content">
+                  <strong>取引先マスタを先に取り込み</strong>
+                  <ol>
+                    <li>freee にログイン → <strong>マスタ・口座</strong></li>
+                    <li><strong>取引先</strong> → <strong>CSV インポート</strong></li>
+                    <li>「取引先コードを元にインポート」を選択</li>
+                    <li>取引先マスタ CSV をアップロード</li>
+                  </ol>
+                </div>
+              </div>
+              <div class="upload-step-item">
+                <div class="upload-step-number" id="slip-step-number">1</div>
+                <div class="upload-step-content">
+                  <strong>仕訳 CSV を取り込み</strong>
+                  <ol>
+                    <li>freee にログイン → <strong>取引入力</strong></li>
+                    <li><strong>振替伝票</strong> → <strong>インポート</strong></li>
+                    <li>「他社会計ソフト仕訳のインポート」を選択</li>
+                    <li>仕訳 CSV をアップロード (ファイルが複数ある場合は順番に)</li>
+                  </ol>
+                </div>
+              </div>
+              <div class="upload-step-item">
+                <div class="upload-step-number" id="cleanup-step-number">2</div>
+                <div class="upload-step-content">
+                  <strong>過去マッピング削除の注意</strong>
+                  <p>重複インポートを行った場合、以前のインポートで作成された科目マッピング設定が残っていると正しく取り込まれない場合があります。</p>
+                  <p>freee サポート <a href="#" onclick="return false;" class="link-inline">「重複インポート時の科目設定削除手順」</a> を参照してください。</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error state -->
+      <div id="result-error" style="display:none">
+        <div class="card error-card">
+          <h2 class="card-title">
+            <svg class="icon-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            変換エラー
+          </h2>
+          <p id="error-message" class="error-message"></p>
+          <div class="collapsible-card" style="margin-top:16px">
+            <div class="collapsible-header" data-target="stderr-content">
+              <span>詳細ログ (stderr)</span>
+              <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </div>
+            <div id="stderr-content" class="collapsible-body" style="display:none">
+              <pre id="stderr-text" class="code-block"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step-actions" style="margin-top:24px">
+        <button id="btn-restart" class="btn btn-ghost">← もう一度実行</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- History Section -->
+  <section id="history-section" class="history-section">
+    <div class="history-inner">
+      <h2 class="history-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
+        </svg>
+        実行ヒストリ
+      </h2>
+      <div id="history-list">
+        <p class="history-empty">ヒストリを読み込み中...</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dedup choices modal (custom 戦略) -->
+  <div id="dedup-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box modal-box-lg">
+      <h3>同名異コードの対処を選択</h3>
+      <p id="dedup-modal-desc">同一名称に複数の取引先コードが見つかりました。各取引先の対処方法を選んでください。</p>
+
+      <div class="dedup-modal-toolbar">
+        <button type="button" id="btn-dedup-auto-all" class="btn btn-ghost btn-sm-inner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          全て自動推奨 (最頻コードに統合)
+        </button>
+      </div>
+
+      <div id="dedup-cards-container" class="dedup-cards-container"></div>
+
+      <div class="modal-actions" style="margin-top:20px">
+        <button id="btn-dedup-cancel" class="btn btn-ghost">キャンセル</button>
+        <button id="btn-dedup-execute" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          決定して変換実行
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shutdown confirm modal -->
+  <div id="shutdown-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box">
+      <h3>サーバーを停止しますか?</h3>
+      <p>停止するとブラウザからの操作ができなくなります。</p>
+      <div class="modal-actions">
+        <button id="btn-shutdown-cancel" class="btn btn-ghost">キャンセル</button>
+        <button id="btn-shutdown-confirm" class="btn btn-danger">停止する</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="app-footer">
+    <p>obc_to_freee — 勘定奉行 CSV → freee 仕訳インポート変換ツール</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
