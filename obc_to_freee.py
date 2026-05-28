@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import copy
 import csv
 import json
 import os
@@ -695,6 +696,7 @@ def obc_row_to_freee(row: list, header_idx: dict, line_no: int) -> dict:
         "dr_amount": dr_amount,
         "dr_tax_code": dr_tax_code,
         "dr_tax_amount": dr_tax_amount,
+        "dr_tax_label_raw": dr_tax_label,   # 奉行原本の税区分略称 (変換前)
         "cr_kamoku": cr_kamoku,
         "cr_hojo": cr_hojo,
         "cr_partner": cr_partner,
@@ -703,6 +705,7 @@ def obc_row_to_freee(row: list, header_idx: dict, line_no: int) -> dict:
         "cr_amount": cr_amount,
         "cr_tax_code": cr_tax_code,
         "cr_tax_amount": cr_tax_amount,
+        "cr_tax_label_raw": cr_tax_label,   # 奉行原本の税区分略称 (変換前)
         "summary": summary,
     }
 
@@ -1090,6 +1093,221 @@ def read_obc_csv(filepath: str, date_from=None, date_to=None,
             groups[key].append(d)
 
     return groups
+
+
+# ---------------------------------------------------------------------------
+# 課売上+マイナス 自動振替 (Transformation 3)
+# ---------------------------------------------------------------------------
+
+def apply_kauuri_rebate(groups: OrderedDict,
+                        strategy: str = "warn-only",
+                        rebate_kamoku: str = "売上値引高",
+                        custom_choices: dict = None) -> tuple:
+    """
+    奉行「課売上」+マイナス金額の行を freee 振替伝票形式に変換する。
+
+    strategy:
+        "warn-only"   : 何もしない (デフォルト)
+        "auto-rebate" : 自動変換 (rebate_kamoku を使用)
+        "custom"      : custom_choices dict で件別に処理
+
+    変換内容 (auto-rebate 時):
+        - 借方/貸方を入れ替え (元が貸方なら借方へ、元が借方なら貸方へ)
+        - 金額を符号反転 (マイナス → プラス)
+        - 税区分を「課税売返10%」(8%軽減なら「課税売返8%（軽）」)
+        - 勘定科目を rebate_kamoku に変更
+
+    custom_choices フォーマット:
+        {"<slip_no>_<date>_<side>": {"action": "auto-rebate"|"keep", "kamoku": "..."}}
+
+    戻り値: (updated_groups, rebate_log)
+        rebate_log: [{"slip_no":..., "date":..., "side":..., "orig_kamoku":...,
+                      "orig_amount":..., "tax_rate":..., "result_kamoku":...,
+                      "result_tax_code":..., "action":...}, ...]
+    """
+    if strategy == "warn-only":
+        return groups, []
+
+    # 課税売返 税区分マッピング (税率別)
+    REBATE_TAX_MAP = {
+        "10": "課税売返10%",
+        "8":  "課税売返8%（軽）",
+        "0":  "課税売返10%",  # 税率不明 → 10% フォールバック
+        "":   "課税売返10%",
+    }
+
+    updated_groups = OrderedDict()
+    rebate_log = []
+
+    for key, slip_rows in groups.items():
+        new_rows = []
+        for r in slip_rows:
+            # 借方側: 課売上+マイナス
+            dr_label = r.get("dr_tax_code", "")  # TAX_MAP変換後なので課税売上10%等
+            dr_orig_label = r.get("dr_tax_label_raw", "")  # 元の奉行税区分 (保存してあれば)
+            # obcRowToFreee では drTaxCode は mapTax 後の値のみ保存のため、
+            # 奉行原本の税区分を判定するには元データが必要
+            # ここでは TAX_MAP 変換後のコードが「課税売上10%」「課税売上8%（軽）」かで判定
+            dr_amount_raw = r.get("dr_amount", "0")
+            cr_amount_raw = r.get("cr_amount", "0")
+
+            try:
+                dr_int = int(str(dr_amount_raw).strip() or "0")
+            except ValueError:
+                dr_int = 0
+            try:
+                cr_int = int(str(cr_amount_raw).strip() or "0")
+            except ValueError:
+                cr_int = 0
+
+            # 課売上判定: TAX_MAP変換後コードが課税売上 and 金額マイナス
+            dr_is_kauuri_minus = (
+                r.get("dr_tax_code", "") in ("課税売上10%", "課税売上8%（軽）")
+                and dr_int < 0
+            )
+            cr_is_kauuri_minus = (
+                r.get("cr_tax_code", "") in ("課税売上10%", "課税売上8%（軽）")
+                and cr_int < 0
+            )
+
+            if not dr_is_kauuri_minus and not cr_is_kauuri_minus:
+                new_rows.append(r)
+                continue
+
+            # どちらの側か特定
+            side = "借方" if dr_is_kauuri_minus else "貸方"
+            slip_no = r.get("slip_no", "")
+            date = r.get("date", "")
+
+            # custom 選択
+            if strategy == "custom":
+                choice_key = f"{slip_no}_{date}_{side}"
+                choice = (custom_choices or {}).get(choice_key, {"action": "keep"})
+                action = choice.get("action", "keep")
+                use_kamoku = choice.get("kamoku", rebate_kamoku)
+            else:
+                action = "auto-rebate"
+                use_kamoku = rebate_kamoku
+
+            if action == "keep":
+                new_rows.append(r)
+                rebate_log.append({
+                    "slip_no": slip_no, "date": date, "side": side,
+                    "orig_kamoku": r.get("dr_kamoku" if side == "借方" else "cr_kamoku", ""),
+                    "orig_amount": dr_int if side == "借方" else cr_int,
+                    "tax_rate": "10" if "10%" in r.get("dr_tax_code" if side == "借方" else "cr_tax_code", "") else "8",
+                    "result_kamoku": "",
+                    "result_tax_code": "",
+                    "action": "keep",
+                })
+                continue
+
+            # auto-rebate: 変換実行
+            row = dict(r)
+            if side == "借方":
+                # 借方課売上マイナス → 貸方へ移動、借方空欄
+                orig_kamoku = row.get("dr_kamoku", "")
+                orig_amount = dr_int
+                tax_code = row.get("dr_tax_code", "")
+                tax_rate = "8" if "8%" in tax_code else "10"
+                rebate_tax = REBATE_TAX_MAP.get(tax_rate, "課税売返10%")
+                # Critical-1: __original__ センチネル値を奉行原本科目に解決
+                final_kamoku = orig_kamoku if use_kamoku == "__original__" else use_kamoku
+                # Critical-3: 元の貸方側が有効な場合、対側行を別途保持
+                cr_kamoku_orig = row.get("cr_kamoku", "")
+                cr_amount_orig = cr_int
+                has_valid_cr = bool(cr_kamoku_orig) and cr_amount_orig != 0
+                # 貸方に設定 (符号反転)
+                row["cr_kamoku"] = final_kamoku
+                row["cr_amount"] = str(abs(orig_amount))
+                row["cr_tax_code"] = rebate_tax
+                # Critical-2: 税額も abs() で正数化
+                row["cr_tax_amount"] = str(abs(int(row.get("dr_tax_amount", "0") or "0")))
+                row["cr_hojo"] = ""
+                row["cr_bumon"] = row.get("dr_bumon", "")
+                row["cr_partner"] = row.get("dr_partner", "")
+                row["cr_partner_code"] = row.get("dr_partner_code", "")
+                # 借方を空欄化
+                row["dr_kamoku"] = ""
+                row["dr_amount"] = ""
+                row["dr_tax_code"] = ""
+                row["dr_tax_amount"] = ""
+                row["dr_hojo"] = ""
+                row["dr_bumon"] = ""
+                row["dr_partner"] = ""
+                row["dr_partner_code"] = ""
+                new_rows.append(row)
+                # Critical-3: 元の貸方側が有効だった場合、対側行を別行として保持
+                if has_valid_cr:
+                    preserve_row = dict(r)
+                    preserve_row["dr_kamoku"] = ""
+                    preserve_row["dr_amount"] = ""
+                    preserve_row["dr_tax_code"] = ""
+                    preserve_row["dr_tax_amount"] = ""
+                    preserve_row["dr_hojo"] = ""
+                    preserve_row["dr_bumon"] = ""
+                    preserve_row["dr_partner"] = ""
+                    preserve_row["dr_partner_code"] = ""
+                    new_rows.append(preserve_row)
+            else:
+                # 貸方課売上マイナス → 借方へ移動、貸方空欄
+                orig_kamoku = row.get("cr_kamoku", "")
+                orig_amount = cr_int
+                tax_code = row.get("cr_tax_code", "")
+                tax_rate = "8" if "8%" in tax_code else "10"
+                rebate_tax = REBATE_TAX_MAP.get(tax_rate, "課税売返10%")
+                # Critical-1: __original__ センチネル値を奉行原本科目に解決
+                final_kamoku = orig_kamoku if use_kamoku == "__original__" else use_kamoku
+                # Critical-3: 元の借方側が有効な場合、対側行を別途保持
+                dr_kamoku_orig = row.get("dr_kamoku", "")
+                dr_amount_orig = dr_int
+                has_valid_dr = bool(dr_kamoku_orig) and dr_amount_orig != 0
+                # 借方に設定 (符号反転)
+                row["dr_kamoku"] = final_kamoku
+                row["dr_amount"] = str(abs(orig_amount))
+                row["dr_tax_code"] = rebate_tax
+                # Critical-2: 税額も abs() で正数化
+                row["dr_tax_amount"] = str(abs(int(row.get("cr_tax_amount", "0") or "0")))
+                row["dr_hojo"] = ""
+                row["dr_bumon"] = row.get("cr_bumon", "")
+                row["dr_partner"] = row.get("cr_partner", "")
+                row["dr_partner_code"] = row.get("cr_partner_code", "")
+                # 貸方を空欄化
+                row["cr_kamoku"] = ""
+                row["cr_amount"] = ""
+                row["cr_tax_code"] = ""
+                row["cr_tax_amount"] = ""
+                row["cr_hojo"] = ""
+                row["cr_bumon"] = ""
+                row["cr_partner"] = ""
+                row["cr_partner_code"] = ""
+                new_rows.append(row)
+                # Critical-3: 元の借方側が有効だった場合、対側行を別行として保持
+                if has_valid_dr:
+                    preserve_row = dict(r)
+                    preserve_row["cr_kamoku"] = ""
+                    preserve_row["cr_amount"] = ""
+                    preserve_row["cr_tax_code"] = ""
+                    preserve_row["cr_tax_amount"] = ""
+                    preserve_row["cr_hojo"] = ""
+                    preserve_row["cr_bumon"] = ""
+                    preserve_row["cr_partner"] = ""
+                    preserve_row["cr_partner_code"] = ""
+                    new_rows.append(preserve_row)
+            # Critical-3 対応のため new_rows.append(row) は上の各ブランチで実行済
+            rebate_log.append({
+                "slip_no": slip_no, "date": date, "side": side,
+                "orig_kamoku": orig_kamoku,
+                "orig_amount": orig_amount,
+                "tax_rate": tax_rate,
+                "result_kamoku": final_kamoku,
+                "result_tax_code": rebate_tax,
+                "action": "auto-rebate",
+            })
+
+        updated_groups[key] = new_rows
+
+    return updated_groups, rebate_log
 
 
 # ---------------------------------------------------------------------------
@@ -1907,12 +2125,93 @@ def _detect_non_taxable_mismatches(input_files: list, date_from=None, date_to=No
     return results
 
 
+def _detect_kauuri_mismatches(input_files: list, date_from=None, date_to=None,
+                              encoding: str = "auto") -> list:
+    """
+    奉行原本から「課売上」+マイナス金額の起票行を検出して返す。
+    GUI の upload-and-detect / --detect-kauuri-only モードで使用する共通関数。
+    返り値: [{"slip_no": ..., "date": ..., "side": "借方"|"貸方",
+              "orig_kamoku": ..., "amount": ..., "tax_rate": ..., "summary": ...}, ...]
+    """
+    results = []
+    for fpath in input_files:
+        try:
+            if encoding == "auto":
+                enc = detect_encoding(fpath)
+            else:
+                enc = encoding
+            with open(fpath, encoding=enc, errors="replace") as f:
+                reader = csv.reader(f)
+                try:
+                    header_row = next(reader)
+                except StopIteration:
+                    continue
+                header_idx = build_header_index(header_row)
+                for row in reader:
+                    if not row:
+                        continue
+                    date_str = get_col(row, header_idx, OBC_COL_DATE).strip()
+                    if not date_str:
+                        continue
+                    if date_from or date_to:
+                        try:
+                            row_date = datetime.strptime(date_str, "%Y/%m/%d")
+                            if date_from and row_date < date_from:
+                                continue
+                            if date_to and row_date > date_to:
+                                continue
+                        except ValueError:
+                            pass
+                    slip_no = get_col(row, header_idx, OBC_COL_SLIP_NO).strip()
+                    summary = get_col(row, header_idx, OBC_COL_SUMMARY).strip()
+                    dr_tax_label = get_col(row, header_idx, OBC_COL_DR_TAX_LABEL).strip()
+                    cr_tax_label = get_col(row, header_idx, OBC_COL_CR_TAX_LABEL).strip()
+                    dr_val = get_col(row, header_idx, OBC_COL_DR_AMOUNT).strip()
+                    cr_val = get_col(row, header_idx, OBC_COL_CR_AMOUNT).strip()
+                    dr_tax_rate = get_col(row, header_idx, OBC_COL_DR_TAX_RATE).strip()
+                    cr_tax_rate = get_col(row, header_idx, OBC_COL_CR_TAX_RATE).strip()
+                    dr_kamoku = get_col(row, header_idx, OBC_COL_DR_KAMOKU).strip()
+                    cr_kamoku = get_col(row, header_idx, OBC_COL_CR_KAMOKU).strip()
+                    # 借方側
+                    if dr_tax_label == "課売上":
+                        try:
+                            dr_amt = int(dr_val) if dr_val else 0
+                            if dr_amt < 0:
+                                results.append({
+                                    "slip_no": slip_no, "date": date_str, "side": "借方",
+                                    "orig_kamoku": dr_kamoku,
+                                    "amount": dr_amt,
+                                    "tax_rate": dr_tax_rate or "10",
+                                    "summary": summary,
+                                })
+                        except ValueError:
+                            pass
+                    # 貸方側
+                    if cr_tax_label == "課売上":
+                        try:
+                            cr_amt = int(cr_val) if cr_val else 0
+                            if cr_amt < 0:
+                                results.append({
+                                    "slip_no": slip_no, "date": date_str, "side": "貸方",
+                                    "orig_kamoku": cr_kamoku,
+                                    "amount": cr_amt,
+                                    "tax_rate": cr_tax_rate or "10",
+                                    "summary": summary,
+                                })
+                        except ValueError:
+                            pass
+        except OSError:
+            pass
+    return results
+
+
 def audit_obc_source(input_files: list, date_from=None, date_to=None,
-                     quiet: bool = False, encoding: str = "auto"):
+                     quiet: bool = False, encoding: str = "auto",
+                     kauuri_rebate_log: list = None):
     """
     奉行原本 CSV を直接走査して以下の3種を stderr に出力する。
       A: 伝票単位の借貸不一致 (借方本体金額, 貸方本体金額 カラムで集計)
-      B: 課売上 + マイナス金額の返品疑い行
+      B: 課売上 + マイナス金額の返品疑い行 (kauuri_rebate_log で振替済のものは除外)
       C: 非課税区分 (非売上) + 税額 > 0 の矛盾行
          (奉行起票時に税区分は非課税なのに税額が入っているケース。
           freee で「非課売上では税額を入力できません」エラーになる)
@@ -1921,9 +2220,20 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     date_from/date_to の期間外伝票は除外 (変換対象と同一範囲のみ警告)。
     quiet=True の場合は何も出力しない。
     encoding: "auto" の場合は detect_encoding() で自動判定。
+    kauuri_rebate_log: apply_kauuri_rebate() が返した振替ログ。
+        振替済 (slip_no, date, side) を課売上マイナス警告から除外する。
     """
     if quiet:
         return
+
+    # Warning-1: kauuri 振替済 (slip_no, date, side) セットを構築してフィルタ除外に使う
+    kauuri_rebated_keys: set = set()
+    if kauuri_rebate_log:
+        for entry in kauuri_rebate_log:
+            if entry.get("action") == "auto-rebate":
+                kauuri_rebated_keys.add(
+                    (entry.get("slip_no", ""), entry.get("date", ""), entry.get("side", ""))
+                )
 
     # --- 集計用データ構造 ---
     # A: slip_key -> (date_str, dr_total, cr_total)
@@ -1997,7 +2307,9 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
                         try:
                             dr_amount_int = int(dr_val) if dr_val else 0
                             if dr_amount_int < 0:
-                                minus_kaubai.append((slip_no, date_str, "借方", dr_amount_int, summary))
+                                # Warning-1: kauuri 振替済はスキップ
+                                if (slip_no, date_str, "借方") not in kauuri_rebated_keys:
+                                    minus_kaubai.append((slip_no, date_str, "借方", dr_amount_int, summary))
                         except ValueError:
                             pass
 
@@ -2007,7 +2319,9 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
                         try:
                             cr_amount_int = int(cr_val) if cr_val else 0
                             if cr_amount_int < 0:
-                                minus_kaubai.append((slip_no, date_str, "貸方", cr_amount_int, summary))
+                                # Warning-1: kauuri 振替済はスキップ
+                                if (slip_no, date_str, "貸方") not in kauuri_rebated_keys:
+                                    minus_kaubai.append((slip_no, date_str, "貸方", cr_amount_int, summary))
                         except ValueError:
                             pass
 
@@ -2053,7 +2367,7 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     # --- stderr 出力 ---
     sep = "=" * 70
     print(sep, file=sys.stderr)
-    print("[要確認 1/3] 奉行原本由来の借貸不一致伝票 (経理担当の手動確認推奨)", file=sys.stderr)
+    print("[要確認] 奉行原本由来の借貸不一致伝票 (経理担当の手動確認推奨)", file=sys.stderr)
     print(sep, file=sys.stderr)
     print("変換スクリプトは奉行原本のまま freee 形式へ展開しています。", file=sys.stderr)
     print("freee の各行は借貸一致するよう自動調整しますが、奉行原本の起票時点で", file=sys.stderr)
@@ -2074,7 +2388,7 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
-    print("[要確認 2/3] 課売上区分 + マイナス金額の返品疑い (課売返 への振替検討)", file=sys.stderr)
+    print("[要確認] 課売上区分 + マイナス金額の返品疑い (課売返 への振替検討)", file=sys.stderr)
     print(sep, file=sys.stderr)
     print("返品/値引き仕訳は本来「課売返」区分が望ましいですが、", file=sys.stderr)
     print("以下の仕訳は「課売上」区分のままマイナス金額で起票されています。", file=sys.stderr)
@@ -2098,7 +2412,7 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
-    print("[要確認 3/3] 非課売上区分 + 税額あり (freee インポートエラー対象)", file=sys.stderr)
+    print("[要確認] 非課売上区分 + 税額あり (freee インポートエラー対象)", file=sys.stderr)
     print(sep, file=sys.stderr)
     print("奉行原本で税区分が「非売上」(=非課税売上) なのに税額が入っている", file=sys.stderr)
     print("矛盾起票です。freee は「非課売上では税額を入力できません」エラーを返すため、", file=sys.stderr)
@@ -2146,12 +2460,12 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
-    print("変換処理は正常完了しました。上記 1/3・2/3 は freee エラー扱いではなく", file=sys.stderr)
-    print("経理担当の業務的確認推奨、3/3 は freee がエラーで弾く項目、", file=sys.stderr)
+    print("変換処理は正常完了しました。上記「借貸不一致」「課売上マイナス」は freee エラー扱いではなく", file=sys.stderr)
+    print("経理担当の業務的確認推奨、「非課売上+税額あり」は freee がエラーで弾く項目、", file=sys.stderr)
     print("「業務確認用」は freee エラーにならないが奉行データの妥当性確認推奨。", file=sys.stderr)
     print("", file=sys.stderr)
     print("※ 同一伝票で借方=非売上+税額、貸方=非仕入+税額の両方に該当する場合、", file=sys.stderr)
-    print("   3/3 と業務確認用の両方に同じ伝票番号が表示されます。", file=sys.stderr)
+    print("   「非課売上区分」と業務確認用の両方に同じ伝票番号が表示されます。", file=sys.stderr)
     print(sep, file=sys.stderr)
 
 
@@ -2265,6 +2579,44 @@ def main():
             "GUI の対話フロー Phase 1 で使用。"
         ),
     )
+    parser.add_argument(
+        "--kauuri-rebate-strategy",
+        dest="kauuri_rebate_strategy",
+        choices=["warn-only", "auto-rebate", "custom"],
+        default="warn-only",
+        help=(
+            "課売上+マイナス金額の対処戦略 (デフォルト: warn-only)。"
+            "warn-only=警告のみ (変換なし) / "
+            "auto-rebate=自動で振替伝票形式に変換 (借方移動+符号反転+課税売返+勘定科目選択) / "
+            "custom=--kauuri-rebate-custom-json で件別指定"
+        ),
+    )
+    parser.add_argument(
+        "--kauuri-rebate-kamoku",
+        dest="kauuri_rebate_kamoku",
+        default="売上値引高",
+        help="auto-rebate 時の振替先勘定科目 (デフォルト: 売上値引高)。"
+             "例: --kauuri-rebate-kamoku 売上戻り高",
+    )
+    parser.add_argument(
+        "--kauuri-rebate-custom-json",
+        dest="kauuri_rebate_custom_json",
+        default=None,
+        help=(
+            "--kauuri-rebate-strategy=custom 時のカスタム選択 JSON ファイルパス。"
+            'フォーマット: {"<slip_no>_<date>_<側>": {"action": "auto-rebate"|"keep", "kamoku": "..."}, ...}'
+        ),
+    )
+    parser.add_argument(
+        "--detect-kauuri-only",
+        dest="detect_kauuri_only",
+        action="store_true",
+        default=False,
+        help=(
+            "課売上+マイナス起票を検出して JSON 形式で stdout に出力し、変換は行わない。"
+            "GUI の対話フロー Phase 1 で使用。"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -2307,6 +2659,14 @@ def main():
             args.input, date_from, date_to, encoding=args.encoding
         )
         print(json.dumps({"success": True, "mismatches": detected}, ensure_ascii=False, indent=2))
+        return
+
+    # --detect-kauuri-only モード: 課売上+マイナス起票を検出して JSON 出力して終了
+    if args.detect_kauuri_only:
+        detected = _detect_kauuri_mismatches(
+            args.input, date_from, date_to, encoding=args.encoding
+        )
+        print(json.dumps({"success": True, "kauuriMismatches": detected}, ensure_ascii=False, indent=2))
         return
 
     # --detect-duplicates-only モード: 同名異コード検出して JSON 出力して終了
@@ -2360,6 +2720,35 @@ def main():
             all_groups,
             custom_choices=custom_choices,
         )
+
+    # 課売返振替戦略準備
+    kauuri_rebate_custom: dict = None
+    if args.kauuri_rebate_strategy == "custom" and args.kauuri_rebate_custom_json:
+        try:
+            with open(args.kauuri_rebate_custom_json, "r", encoding="utf-8") as _f:
+                kauuri_rebate_custom = json.load(_f)
+            print(f"[課売返] custom 選択 JSON 読み込み: {args.kauuri_rebate_custom_json} ({len(kauuri_rebate_custom)} 件)")
+        except Exception as e:
+            print(f"[課売返] custom JSON 読み込み失敗: {e} — warn-only にフォールバック", file=sys.stderr)
+            args.kauuri_rebate_strategy = "warn-only"
+
+    # Warning-3/4: 元伝票モーダル用に振替前データをスナップショット保存
+    # warn-only 時は振替なしなのでデータ変わらない → 参照コピーのみ
+    if args.kauuri_rebate_strategy != "warn-only":
+        original_groups = copy.deepcopy(all_groups)
+    else:
+        original_groups = all_groups
+
+    # 課売返振替変換 (process_groups の前に適用)
+    kauuri_rebate_log = []
+    if args.kauuri_rebate_strategy != "warn-only":
+        all_groups, kauuri_rebate_log = apply_kauuri_rebate(
+            all_groups,
+            strategy=args.kauuri_rebate_strategy,
+            rebate_kamoku=args.kauuri_rebate_kamoku,
+            custom_choices=kauuri_rebate_custom,
+        )
+        print(f"[課売返] 振替変換: {len(kauuri_rebate_log)} 件処理", file=sys.stderr)
 
     # 非課税+税額矛盾の対処準備
     non_taxable_custom: dict = None
@@ -2479,13 +2868,54 @@ def main():
         print_partner_warnings(deduped_partner_data)
 
     # 奉行原本監査ログ (stderr)
+    # Warning-1: kauuri 振替済伝票を課売上マイナス警告から除外するためログを渡す
     audit_obc_source(args.input, date_from, date_to,
-                     quiet=args.quiet_audit, encoding=args.encoding)
+                     quiet=args.quiet_audit, encoding=args.encoding,
+                     kauuri_rebate_log=kauuri_rebate_log)
+
+    # 元伝票詳細 JSON (stderr、GUI が抽出して使用)
+    # Warning-3/4: original_groups (振替前スナップショット) から構築して奉行原本を表示
+    slip_details: dict = {}
+    for key, slip_rows in original_groups.items():
+        slip_no = slip_rows[0].get("slip_no", "") if slip_rows else ""
+        if not slip_no:
+            continue
+        rows_data = []
+        for r in slip_rows:
+            rows_data.append({
+                "date": r.get("date", ""),
+                "drKamoku": r.get("dr_kamoku", ""),
+                "drHojo": r.get("dr_hojo", ""),
+                "drBumon": r.get("dr_bumon", ""),
+                "drTaxCode": r.get("dr_tax_code", ""),
+                "drTaxLabelRaw": r.get("dr_tax_label_raw", ""),
+                "drAmount": r.get("dr_amount", ""),
+                "drTaxAmount": r.get("dr_tax_amount", ""),
+                "drPartner": r.get("dr_partner", ""),
+                "crKamoku": r.get("cr_kamoku", ""),
+                "crHojo": r.get("cr_hojo", ""),
+                "crBumon": r.get("cr_bumon", ""),
+                "crTaxCode": r.get("cr_tax_code", ""),
+                "crTaxLabelRaw": r.get("cr_tax_label_raw", ""),
+                "crAmount": r.get("cr_amount", ""),
+                "crTaxAmount": r.get("cr_tax_amount", ""),
+                "crPartner": r.get("cr_partner", ""),
+                "summary": r.get("summary", ""),
+            })
+        if slip_no in slip_details:
+            slip_details[slip_no].extend(rows_data)
+        else:
+            slip_details[slip_no] = rows_data
+    print(f"SLIP_DETAILS_JSON:{json.dumps(slip_details, ensure_ascii=False)}", file=sys.stderr)
 
     # 非課税対処結果 JSON (stderr、GUI が抽出して使用)
     # warn-only 時は結果ログを出力しない (JS 両版の挙動に合わせる)
     if nontax_results and args.non_taxable_strategy != "warn-only":
         print(f"NONTAX_RESULTS_JSON:{json.dumps(nontax_results, ensure_ascii=False)}", file=sys.stderr)
+
+    # 課売返振替結果 JSON (stderr、GUI が抽出して使用)
+    if kauuri_rebate_log and args.kauuri_rebate_strategy != "warn-only":
+        print(f"KAUURI_REBATE_JSON:{json.dumps(kauuri_rebate_log, ensure_ascii=False)}", file=sys.stderr)
 
     # エラーレポート (stderr)
     _errors.print_report(

@@ -13,6 +13,9 @@ const state = {
   dedupChoices: {},        // {取引先名: {action, target_code}}
   nonTaxableMismatches: [],// 検出された非課税+税額矛盾 [{slip_no, date, side, tax_label, amount, tax_amount, summary, kamoku}]
   nonTaxableChoices: {},   // {"<伝票No>_<側>": {action: "change-to-taxable"|"zero-tax"|"keep"}}
+  kauuriMismatches: [],    // 検出された課売上+マイナス起票 [{slip_no, date, side, orig_kamoku, amount, tax_rate, summary}]
+  kauuriChoices: {},       // {"<slip_no>_<date>_<側>": {action: "auto-rebate"|"keep", kamoku?: string}}
+  slipDetails: {},         // 元伝票詳細 {"伝票No": [{drKamoku, drAmount, ...}]}
 };
 
 // 相対 URL を使用: Python GUI バックエンドと同一オリジン前提のため
@@ -112,7 +115,7 @@ async function apiUploadAndDetect(formData) {
   return await res.json();
 }
 
-async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoices) {
+async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoices, kauuriChoices) {
   const res = await fetch(BASE + '/api/convert-with-choices', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -120,6 +123,7 @@ async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoice
       uploadToken,
       dedupChoices: dedupChoices || {},
       nonTaxableChoices: nonTaxableChoices || {},
+      kauuriChoices: kauuriChoices || {},
     }),
   });
   if (!res.ok) {
@@ -275,10 +279,25 @@ function applySettingsToForm(s) {
     const el = document.getElementById('non-taxable-strategy');
     if (el) el.value = s.nonTaxableStrategy;
   }
+  if (s.kauuriRebateStrategy !== undefined) {
+    const el = document.getElementById('kauuri-rebate-strategy');
+    if (el) { el.value = s.kauuriRebateStrategy; toggleGuiKauuriRebateOptions(); }
+  }
+  if (s.kauuriRebateKamoku !== undefined) {
+    const el = document.getElementById('kauuri-rebate-kamoku');
+    if (el) { el.value = s.kauuriRebateKamoku; toggleGuiKauuriCustomKamoku(); }
+  }
 }
 
 function collectFormValues() {
-  const ntEl = document.getElementById('non-taxable-strategy');
+  const ntEl    = document.getElementById('non-taxable-strategy');
+  const krEl    = document.getElementById('kauuri-rebate-strategy');
+  const krKEl   = document.getElementById('kauuri-rebate-kamoku');
+  const krCEl   = document.getElementById('kauuri-custom-kamoku');
+  let kauuriRebateKamoku = krKEl ? krKEl.value : '売上値引高';
+  if (kauuriRebateKamoku === '__custom__' && krCEl) {
+    kauuriRebateKamoku = krCEl.value.trim() || '売上値引高';
+  }
   return {
     outputPrefix:   document.getElementById('output-prefix').value.trim(),
     rowsPerFile:    parseInt(document.getElementById('rows-per-file').value, 10) || 10000,
@@ -287,7 +306,96 @@ function collectFormValues() {
     encoding:       document.getElementById('encoding').value,
     dedupStrategy:  document.getElementById('dedup-strategy').value,
     nonTaxableStrategy: ntEl ? ntEl.value : 'change-to-taxable',
+    kauuriRebateStrategy: krEl ? krEl.value : 'warn-only',
+    kauuriRebateKamoku,
   };
+}
+
+function toggleGuiKauuriRebateOptions() {
+  const strat = (document.getElementById('kauuri-rebate-strategy') || {value: 'warn-only'}).value;
+  const box = document.getElementById('kauuri-rebate-kamoku-box-gui');
+  if (box) box.style.display = (strat === 'auto-rebate' || strat === 'custom') ? 'block' : 'none';
+}
+
+function toggleGuiKauuriCustomKamoku() {
+  const sel = document.getElementById('kauuri-rebate-kamoku');
+  const box = document.getElementById('kauuri-custom-kamoku-box-gui');
+  if (sel && box) box.style.display = (sel.value === '__custom__') ? 'block' : 'none';
+}
+
+// ============================================================
+// 元伝票詳細モーダル
+// ============================================================
+function showGuiSlipDetail(slipNo) {
+  const details = state.slipDetails || {};
+  const rows = details[slipNo];
+  const modal = document.getElementById('slip-detail-modal');
+  const title = document.getElementById('slip-detail-modal-title');
+  const body  = document.getElementById('slip-detail-modal-body');
+
+  if (!modal) return;
+
+  title.textContent = `奉行原本 伝票詳細 — No.${slipNo}`;
+
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<p style="color:#6b7280;">データが見つかりません。</p>';
+    modal.style.display = 'flex';
+    return;
+  }
+
+  // drTaxLabelRaw = 奉行原本の税区分略称 (変換前), drTaxCode = freee変換後税区分
+  const headings = ['側', '勘定科目', '補助科目', '部門', '奉行原本税区分', 'freee税区分', '金額', '税額', '取引先', '摘要'];
+  let tbodyHtml = '';
+  for (const r of rows) {
+    const drActive = r.drKamoku || r.drAmount;
+    if (drActive) {
+      tbodyHtml += `<tr>
+        <td style="color:#1d4ed8;font-weight:600">借方</td>
+        <td>${escHtml(r.drKamoku||'')}</td>
+        <td>${escHtml(r.drHojo||'')}</td>
+        <td>${escHtml(r.drBumon||'')}</td>
+        <td>${escHtml(r.drTaxLabelRaw||r.drTaxCode||'')}</td>
+        <td style="color:#888;font-size:11px">${escHtml(r.drTaxCode||'')}</td>
+        <td style="text-align:right">${escHtml(String(r.drAmount||''))}</td>
+        <td style="text-align:right">${escHtml(String(r.drTaxAmount||''))}</td>
+        <td>${escHtml(r.drPartner||'')}</td>
+        <td>${escHtml((r.summary||'').slice(0,40))}</td>
+      </tr>`;
+    }
+    const crActive = r.crKamoku || r.crAmount;
+    if (crActive) {
+      tbodyHtml += `<tr>
+        <td style="color:#15803d;font-weight:600">貸方</td>
+        <td>${escHtml(r.crKamoku||'')}</td>
+        <td>${escHtml(r.crHojo||'')}</td>
+        <td>${escHtml(r.crBumon||'')}</td>
+        <td>${escHtml(r.crTaxLabelRaw||r.crTaxCode||'')}</td>
+        <td style="color:#888;font-size:11px">${escHtml(r.crTaxCode||'')}</td>
+        <td style="text-align:right">${escHtml(String(r.crAmount||''))}</td>
+        <td style="text-align:right">${escHtml(String(r.crTaxAmount||''))}</td>
+        <td>${escHtml(r.crPartner||'')}</td>
+        <td>${escHtml((r.summary||'').slice(0,40))}</td>
+      </tr>`;
+    }
+  }
+
+  body.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr>${headings.map(h=>`<th style="background:#f3f4f6;padding:5px 8px;text-align:left;font-weight:600;white-space:nowrap;">${escHtml(h)}</th>`).join('')}</tr></thead>
+      <tbody>${tbodyHtml}</tbody>
+    </table>`;
+  body.querySelectorAll('tbody tr').forEach(tr => {
+    tr.querySelectorAll('td').forEach(td => {
+      td.style.cssText = td.style.cssText + ';padding:5px 8px;border-bottom:1px solid #f3f4f6;white-space:nowrap;';
+    });
+  });
+
+  modal.style.display = 'flex';
+}
+
+function guiSlipDetailClose() {
+  const modal = document.getElementById('slip-detail-modal');
+  if (modal) modal.style.display = 'none';
 }
 
 async function saveSettings() {
@@ -306,10 +414,11 @@ async function saveSettings() {
 async function executeConvert() {
   const opts = collectFormValues();
 
-  // custom 戦略: dedup または 非課税のいずれかが custom なら upload-and-detect → モーダル表示
+  // custom 戦略: dedup / 非課税 / 課売返のいずれかが custom なら upload-and-detect → モーダル表示
   const dedupCustom = opts.outputPartners && opts.dedupStrategy === 'custom';
   const nonTaxableCustom = opts.nonTaxableStrategy === 'custom';
-  if (dedupCustom || nonTaxableCustom) {
+  const kauuriCustom = opts.kauuriRebateStrategy === 'custom';
+  if (dedupCustom || nonTaxableCustom || kauuriCustom) {
     await executeConvertCustomFlow(opts);
     return;
   }
@@ -347,6 +456,8 @@ function buildFormData(opts) {
   formData.append('encoding',       opts.encoding);
   formData.append('dedupStrategy',  opts.dedupStrategy || 'warn-only');
   formData.append('nonTaxableStrategy', opts.nonTaxableStrategy || 'change-to-taxable');
+  formData.append('kauuriRebateStrategy', opts.kauuriRebateStrategy || 'warn-only');
+  formData.append('kauuriRebateKamoku',   opts.kauuriRebateKamoku   || '売上値引高');
   const dateFrom = document.getElementById('date-from').value;
   const dateTo   = document.getElementById('date-to').value;
   if (dateFrom) formData.append('dateFrom', dateFrom);
@@ -382,20 +493,33 @@ async function executeConvertCustomFlow(opts) {
   state.dedupChoices = {};
   state.nonTaxableMismatches = detectResult.nonTaxableMismatches || [];
   state.nonTaxableChoices = {};
+  state.kauuriMismatches = detectResult.kauuriMismatches || [];
+  state.kauuriChoices = {};
 
-  // モーダル順次フロー: dedup (取引先) → non-taxable (非課税) → 実行
+  // モーダル順次フロー: dedup (取引先) → non-taxable (非課税) → kauuri (課売返) → 実行
   const needDedupModal = opts.outputPartners && opts.dedupStrategy === 'custom' && state.duplicates.length > 0;
   const needNonTaxableModal = opts.nonTaxableStrategy === 'custom' && state.nonTaxableMismatches.length > 0;
+  const needKauuriModal = opts.kauuriRebateStrategy === 'custom' && state.kauuriMismatches.length > 0;
+
+  // 最後のステップ実行関数
+  async function proceedToKauuriOrExecute() {
+    if (needKauuriModal) {
+      goToStep(2);
+      openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku);
+    } else {
+      await runConvertWithChoices();
+    }
+  }
 
   if (needDedupModal) {
     goToStep(2);
-    // dedup モーダル決定後に非課税モーダル or 実行へ進む
+    // dedup モーダル決定後に非課税モーダル or kauuri or 実行へ進む
     openDedupModal(state.duplicates, {
       onAccept: async () => {
         if (needNonTaxableModal) {
-          openNonTaxableModal(state.nonTaxableMismatches);
+          openNonTaxableModal(state.nonTaxableMismatches, { onAccept: proceedToKauuriOrExecute });
         } else {
-          await runConvertWithChoices();
+          await proceedToKauuriOrExecute();
         }
       }
     });
@@ -403,10 +527,15 @@ async function executeConvertCustomFlow(opts) {
   }
   if (needNonTaxableModal) {
     goToStep(2);
-    openNonTaxableModal(state.nonTaxableMismatches);
+    openNonTaxableModal(state.nonTaxableMismatches, { onAccept: proceedToKauuriOrExecute });
     return;
   }
-  // どちらも検出なし → そのまま実行
+  if (needKauuriModal) {
+    goToStep(2);
+    openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku);
+    return;
+  }
+  // いずれも検出なし → そのまま実行
   await runConvertWithChoices();
 }
 
@@ -417,7 +546,8 @@ async function runConvertWithChoices() {
     const result = await apiConvertWithChoices(
       state.uploadToken,
       state.dedupChoices,
-      state.nonTaxableChoices
+      state.nonTaxableChoices,
+      state.kauuriChoices || {}
     );
     state.result = result;
     showLoading(false);
@@ -587,26 +717,31 @@ function initDedupModal() {
 
   // 決定して次へ
   btnExecute.addEventListener('click', async () => {
-    modal.style.display = 'none';
-    state.dedupChoices = collectDedupChoices();
+    btnExecute.disabled = true;
+    try {
+      modal.style.display = 'none';
+      state.dedupChoices = collectDedupChoices();
 
-    // onAccept コールバックがあれば呼ぶ (次の非課税モーダル or 実行)
-    if (state._dedupOnAccept) {
-      const cb = state._dedupOnAccept;
-      state._dedupOnAccept = null;
-      await cb();
-      return;
+      // onAccept コールバックがあれば呼ぶ (次の非課税モーダル or 実行)
+      if (state._dedupOnAccept) {
+        const cb = state._dedupOnAccept;
+        state._dedupOnAccept = null;
+        await cb();
+        return;
+      }
+
+      // フォールバック: 直接実行
+      await runConvertWithChoices();
+    } finally {
+      btnExecute.disabled = false;
     }
-
-    // フォールバック: 直接実行
-    await runConvertWithChoices();
   });
 }
 
 // ============================================================
 // Non-taxable mismatch modal
 // ============================================================
-function openNonTaxableModal(mismatches) {
+function openNonTaxableModal(mismatches, options) {
   const modal = document.getElementById('nontax-modal');
   const desc = document.getElementById('nontax-modal-desc');
   const container = document.getElementById('nontax-cards-container');
@@ -618,6 +753,9 @@ function openNonTaxableModal(mismatches) {
     const card = buildNonTaxableCard(m, i);
     container.appendChild(card);
   });
+
+  // onAccept コールバックを state に保存
+  state._nontaxOnAccept = options && options.onAccept ? options.onAccept : null;
 
   modal.style.display = 'flex';
 }
@@ -718,9 +856,158 @@ function initNonTaxableModal() {
   });
 
   btnExecute.addEventListener('click', async () => {
+    btnExecute.disabled = true;
+    try {
+      modal.style.display = 'none';
+      state.nonTaxableChoices = collectNonTaxableChoices();
+
+      // onAccept コールバックがあれば呼ぶ (次の kauuri モーダル or 実行)
+      if (state._nontaxOnAccept) {
+        const cb = state._nontaxOnAccept;
+        state._nontaxOnAccept = null;
+        await cb();
+        return;
+      }
+
+      // フォールバック: 直接実行
+      await runConvertWithChoices();
+    } finally {
+      btnExecute.disabled = false;
+    }
+  });
+}
+
+// ============================================================
+// Kauuri rebate custom modal
+// ============================================================
+
+const GUI_KAMOKU_OPTIONS = [
+  { label: '売上値引高', value: '売上値引高' },
+  { label: '売上戻り高', value: '売上戻り高' },
+  { label: '奉行原本科目を維持', value: '__original__' },
+  { label: 'カスタム入力', value: '__custom__' },
+];
+
+function openKauuriModal(mismatches, defaultKamoku) {
+  const modal = document.getElementById('kauuri-modal');
+  const desc = document.getElementById('kauuri-modal-desc');
+  const container = document.getElementById('kauuri-cards-container');
+
+  desc.textContent = `課売上+マイナス起票が ${mismatches.length} 件見つかりました。各件の振替方法を選んでください。`;
+
+  container.innerHTML = '';
+  mismatches.forEach((m, i) => {
+    const card = buildKauuriCard(m, i, defaultKamoku || '売上値引高');
+    container.appendChild(card);
+  });
+
+  modal.style.display = 'flex';
+}
+
+function buildKauuriCard(m, idx, defaultKamoku) {
+  const card = document.createElement('div');
+  card.className = 'dedup-card';
+  card.dataset.key = `${m.slip_no}_${m.date}_${m.side}`;
+
+  const radioName = `kauuri_${idx}`;
+  const selectId  = `kauuri_select_${idx}`;
+  const customBoxId = `kauuri_custom_box_${idx}`;
+  const customInputId = `kauuri_custom_input_${idx}`;
+  const summaryShort = (m.summary || '').slice(0, 30);
+  const taxSuffix = (m.tax_rate === '8') ? '8%（軽）' : '10%';
+
+  const optionsHtml = GUI_KAMOKU_OPTIONS.map(opt => {
+    const isDefault = opt.value === defaultKamoku || (opt.value === '売上値引高' && defaultKamoku !== '__original__' && defaultKamoku !== '売上戻り高' && defaultKamoku !== '__custom__');
+    return `<option value="${opt.value}"${isDefault ? ' selected' : ''}>${escHtml(opt.label)}</option>`;
+  }).join('');
+
+  card.innerHTML = `
+    <div class="dedup-card-header">
+      <strong>伝票 No.${escHtml(m.slip_no)}</strong> <span style="color:#666">(${escHtml(m.date)}) ${escHtml(m.side)}</span>
+    </div>
+    <div class="dedup-card-codes" style="margin:8px 0; font-size:14px; color:#555">
+      勘定科目: <strong>${escHtml(m.orig_kamoku||'')}</strong> / 金額: ${(m.amount||0).toLocaleString()} / 摘要: ${escHtml(summaryShort)}
+    </div>
+    <div class="dedup-card-options" style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
+      <label style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+        <input type="radio" name="${radioName}" value="auto-rebate" checked>
+        <span>自動振替 (借方移動+符号反転+課税売返${taxSuffix}):</span>
+        <select id="${selectId}" class="form-control" style="display:inline-block; width:auto; max-width:220px"
+          onchange="guiKauuriKamokuChange('${selectId}','${customBoxId}')">${optionsHtml}</select>
+      </label>
+      <div id="${customBoxId}" style="display:none; margin-left:20px; margin-top:4px;">
+        <input type="text" id="${customInputId}" class="form-control"
+          placeholder="例: 売上控除" style="font-family:monospace; max-width:240px;">
+      </div>
+      <label><input type="radio" name="${radioName}" value="keep"> 変更なし (現状維持)</label>
+    </div>
+  `;
+  return card;
+}
+
+function guiKauuriKamokuChange(selectId, boxId) {
+  const sel = document.getElementById(selectId);
+  const box = document.getElementById(boxId);
+  if (sel && box) box.style.display = (sel.value === '__custom__') ? 'block' : 'none';
+}
+
+function collectKauuriChoices() {
+  const result = {};
+  const cards = document.querySelectorAll('#kauuri-cards-container .dedup-card');
+  cards.forEach((card, cardIdx) => {
+    const key = card.dataset.key;
+    const checked = card.querySelector('input[type=radio]:checked');
+    if (!key || !checked) return;
+    const action = checked.value;
+    const entry = { action };
+    if (action === 'auto-rebate') {
+      const sel = card.querySelector('select');
+      if (sel) {
+        if (sel.value === '__custom__') {
+          // カスタム入力欄から取得 (同じカード内の input[type=text])
+          const customInput = card.querySelector('input[type=text]');
+          entry.kamoku = (customInput && customInput.value.trim()) ? customInput.value.trim() : '売上値引高';
+        } else {
+          entry.kamoku = sel.value;
+        }
+      }
+    }
+    result[key] = entry;
+  });
+  return result;
+}
+
+function initKauuriModal() {
+  const modal = document.getElementById('kauuri-modal');
+  const btnCancel  = document.getElementById('btn-kauuri-cancel');
+  const btnExecute = document.getElementById('btn-kauuri-execute');
+  const btnAutoAll = document.getElementById('btn-kauuri-auto-all');
+
+  if (!modal) return;
+
+  btnCancel.addEventListener('click', () => {
     modal.style.display = 'none';
-    state.nonTaxableChoices = collectNonTaxableChoices();
-    await runConvertWithChoices();
+    goToStep(2);
+  });
+
+  btnAutoAll.addEventListener('click', () => {
+    const cards = document.querySelectorAll('#kauuri-cards-container .dedup-card');
+    cards.forEach(card => {
+      const radio = card.querySelector('input[value="auto-rebate"]');
+      if (radio) radio.checked = true;
+    });
+    showToast('全件「自動振替」を設定しました', 'success');
+  });
+
+  btnExecute.addEventListener('click', async () => {
+    btnExecute.disabled = true;
+    try {
+      modal.style.display = 'none';
+      state.kauuriChoices = collectKauuriChoices();
+      await runConvertWithChoices();
+    } finally {
+      btnExecute.disabled = false;
+    }
   });
 }
 
@@ -798,6 +1085,14 @@ function renderResultSuccess(r) {
     renderDedupAuditSection(r.dedupAudit);
   }
 
+  // Store slip details for modal access
+  state.slipDetails = r.slipDetails || {};
+
+  // Kauuri rebate results section
+  if (r.kauuriRebateResults && r.kauuriRebateResults.length > 0) {
+    renderKauuriRebateResultsSection(r.kauuriRebateResults, r.outputs);
+  }
+
   // Non-taxable results section
   if (r.nonTaxableResults && r.nonTaxableResults.length > 0) {
     renderNonTaxableResultsSection(r.nonTaxableResults, r.outputs);
@@ -815,9 +1110,9 @@ function renderAuditSection(s) {
   container.innerHTML = '';
 
   const sections = [
-    { key: 'balanceWarnings',         label: '[要確認 1/3] 借貸不一致',                                          cols: ['日付', '伝票No', '内容'] },
-    { key: 'negativeWarnings',        label: '[要確認 2/3] 課売上マイナス',                                      cols: ['日付', '科目', '金額'] },
-    { key: 'nonTaxableSalesWarnings', label: '[要確認 3/3] 非課売上+税額あり (freeeエラー対象)',                  cols: ['伝票No', '日付', '内容'] },
+    { key: 'balanceWarnings',         label: '[要確認] 借貸不一致',                                              cols: ['日付', '伝票No', '内容'] },
+    { key: 'negativeWarnings',        label: '[要確認] 課売上マイナス',                                          cols: ['日付', '科目', '金額'] },
+    { key: 'nonTaxableSalesWarnings', label: '[要確認] 非課売上+税額あり (freeeエラー対象)',                      cols: ['伝票No', '日付', '内容'] },
     { key: 'businessReview',          label: '[参考情報 ※件数外] 非仕入+税額あり (freeeエラーなし・対処任意)',    cols: ['伝票No', '日付', '内容'], isRef: true },
     { key: 'auditA',                  label: '[要確認 取引先マスタ A] 同コード異名',                              cols: ['コード', '名称1', '名称2'] },
     { key: 'auditB',                  label: '[要確認 取引先マスタ B] 同名異コード',                              cols: ['名称', 'コード1', 'コード2'] },
@@ -856,21 +1151,53 @@ function renderAuditSection(s) {
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
+    // 伝票No クリックでモーダルを開けるセクション
+    const hasSlipDetailClick = (sec.key === 'balanceWarnings' || sec.key === 'negativeWarnings');
     rows.slice(0, 200).forEach(row => {
       const tr = document.createElement('tr');
       if (Array.isArray(row)) {
-        row.forEach(cell => {
+        row.forEach((cell, ci) => {
           const td = document.createElement('td');
           td.textContent = cell != null ? String(cell) : '';
           tr.appendChild(td);
         });
       } else {
-        // row is object — use values
-        Object.values(row).forEach(cell => {
-          const td = document.createElement('td');
-          td.textContent = cell != null ? String(cell) : '';
+        // row is object — first value may be slip No (文字列エントリ)
+        const cellVal = typeof row === 'string' ? row : (Object.values(row)[0] ?? '');
+        const td = document.createElement('td');
+        if (hasSlipDetailClick && typeof cellVal === 'string' && cellVal.startsWith('No. ')) {
+          // "No. {slip_no} ..." → extract slip_no
+          const parts = cellVal.split(' ');  // ['No.', '{slip_no}', ...]
+          const slipNo = parts[1] || '';
+          if (slipNo && state.slipDetails && state.slipDetails[slipNo]) {
+            const btn = document.createElement('button');
+            btn.className = 'slip-detail-btn-gui';
+            btn.style.cssText = 'background:none;border:none;color:#2563eb;cursor:pointer;font-size:13px;font-weight:500;padding:0;text-decoration:underline;text-underline-offset:2px;';
+            btn.textContent = slipNo;
+            btn.title = '元伝票詳細を表示';
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              showGuiSlipDetail(slipNo);
+            });
+            // Render: [clickable slipNo button] + rest of text
+            const rest = document.createTextNode(' ' + parts.slice(2).join(' '));
+            td.appendChild(btn);
+            td.appendChild(rest);
+          } else {
+            td.textContent = cellVal;
+          }
           tr.appendChild(td);
-        });
+        } else if (typeof row === 'string') {
+          td.textContent = row;
+          tr.appendChild(td);
+        } else {
+          td.remove();
+          Object.values(row).forEach(cell => {
+            const td2 = document.createElement('td');
+            td2.textContent = cell != null ? String(cell) : '';
+            tr.appendChild(td2);
+          });
+        }
       }
       tbody.appendChild(tr);
     });
@@ -949,6 +1276,69 @@ function renderDedupAuditSection(dedupAudit) {
   titleHtml.appendChild(body);
   dedupSection.appendChild(titleHtml);
   auditSection.parentNode.insertBefore(dedupSection, auditSection.nextSibling);
+}
+
+function renderKauuriRebateResultsSection(results, outputs) {
+  const existing = document.getElementById('kauuri-rebate-result-section');
+  if (existing) existing.remove();
+  if (!results || results.length === 0) return;
+
+  const auditSection = document.getElementById('audit-section');
+  const section = document.createElement('div');
+  section.id = 'kauuri-rebate-result-section';
+  section.className = 'card dedup-result-section';
+
+  const titleItem = document.createElement('div');
+  titleItem.className = 'audit-item';
+  const header = document.createElement('div');
+  header.className = 'audit-item-header';
+  const converted = results.filter(e => e.action === 'auto-rebate').length;
+  const kept      = results.filter(e => e.action === 'keep').length;
+  header.innerHTML = `
+    <span class="audit-item-title">課売返振替変換結果</span>
+    <span class="audit-badge" style="background:#e0f2fe;color:#0369a1;">${results.length} 件 (変換: ${converted} / 維持: ${kept})</span>
+    <svg style="width:16px;height:16px;color:var(--gray-400);flex-shrink:0;transition:transform 0.2s" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="6 9 12 15 18 9"/>
+    </svg>`;
+
+  const body = document.createElement('div');
+  body.className = 'audit-item-body';
+  const table = document.createElement('table');
+  table.innerHTML = `
+    <thead><tr>
+      <th>伝票No</th><th>日付</th><th>元側</th>
+      <th>元科目</th><th>元金額</th><th>税率</th>
+      <th>処理</th><th>変換先科目</th><th>適用後税区分</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+    const actionLabel = row.action === 'auto-rebate' ? '振替変換' : 'そのまま(警告のみ)';
+    tr.innerHTML = `
+      <td>${escHtml(row.slip_no || '')}</td>
+      <td>${escHtml(row.date || '')}</td>
+      <td>${escHtml(row.side || '')}</td>
+      <td>${escHtml(row.orig_kamoku || '')}</td>
+      <td style="text-align:right">${(row.orig_amount||0).toLocaleString()}</td>
+      <td>${escHtml(row.tax_rate ? row.tax_rate + '%' : '')}</td>
+      <td style="color:${row.action==='auto-rebate'?'#2563eb':'#6b7280'}">${escHtml(actionLabel)}</td>
+      <td>${escHtml(row.result_kamoku || '')}</td>
+      <td><strong>${escHtml(row.result_tax_code || '')}</strong></td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  body.appendChild(table);
+
+  const chevron = header.querySelector('svg');
+  header.addEventListener('click', () => {
+    const open = body.classList.toggle('open');
+    chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+  });
+
+  titleItem.appendChild(header);
+  titleItem.appendChild(body);
+  section.appendChild(titleItem);
+  auditSection.parentNode.insertBefore(section, auditSection.nextSibling);
 }
 
 function renderNonTaxableResultsSection(results, outputs) {
@@ -1320,6 +1710,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initShutdownModal();
   initDedupModal();
   initNonTaxableModal();
+  initKauuriModal();
   initRestart();
 
   // Load settings from server

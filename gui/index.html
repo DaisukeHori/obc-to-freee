@@ -162,6 +162,34 @@
               <p class="form-hint">※ 奉行原本で「非売上」なのに税額がある矛盾起票の対処。freee は「非課売上では税額を入力できません」エラーになるため対応が必要。（「非仕入」は「非対仕入10%」等に自動変換されるため対象外）</p>
             </div>
           </div>
+
+          <!-- 課売上+マイナス 対処オプション (青枠 box、常時表示) -->
+          <div class="options-group-box">
+            <div class="form-group">
+              <label for="kauuri-rebate-strategy">課売上+マイナス起票の対処方法</label>
+              <select id="kauuri-rebate-strategy" class="form-control" onchange="toggleGuiKauuriRebateOptions()">
+                <option value="warn-only">警告のみ (変換なし、デフォルト)</option>
+                <option value="auto-rebate">自動: 振替伝票形式に変換 (推奨・借方移動+符号反転+課税売返)</option>
+                <option value="custom">対話: 1 件ずつ選ぶ</option>
+              </select>
+              <p class="form-hint">「課売上」+マイナス起票 (返品/値引き) を freee 公式サンプル CSV 準拠の振替伝票形式に自動変換します。</p>
+            </div>
+            <div id="kauuri-rebate-kamoku-box-gui" style="display:none">
+              <div class="form-group">
+                <label for="kauuri-rebate-kamoku">振替先勘定科目</label>
+                <select id="kauuri-rebate-kamoku" class="form-control" onchange="toggleGuiKauuriCustomKamoku()">
+                  <option value="売上値引高">売上値引高 (推奨・freee公式サンプル準拠)</option>
+                  <option value="売上戻り高">売上戻り高</option>
+                  <option value="__original__">奉行原本の科目をそのまま使用</option>
+                  <option value="__custom__">カスタム入力</option>
+                </select>
+              </div>
+              <div id="kauuri-custom-kamoku-box-gui" style="display:none" class="form-group">
+                <label for="kauuri-custom-kamoku">カスタム勘定科目名</label>
+                <input type="text" id="kauuri-custom-kamoku" class="form-control" placeholder="例: 売上控除">
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="step-actions step-actions-split">
@@ -378,6 +406,32 @@
     </div>
   </div>
 
+  <!-- 課売返振替 custom 対話モーダル -->
+  <div id="kauuri-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box modal-box-lg">
+      <h3>課売上+マイナス起票の振替判断</h3>
+      <p id="kauuri-modal-desc">以下の課売上マイナス起票について、どう振替するか選択してください。</p>
+
+      <div class="dedup-modal-toolbar">
+        <button type="button" id="btn-kauuri-auto-all" class="btn btn-ghost btn-sm-inner">
+          全件 自動推奨で決定
+        </button>
+      </div>
+
+      <div id="kauuri-cards-container" class="dedup-cards-container"></div>
+
+      <div class="modal-actions" style="margin-top:20px">
+        <button id="btn-kauuri-cancel" class="btn btn-ghost">← 戻る</button>
+        <button id="btn-kauuri-execute" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          決定して変換実行
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Shutdown confirm modal -->
   <div id="shutdown-modal" class="modal-overlay" style="display:none">
     <div class="modal-box">
@@ -386,6 +440,17 @@
       <div class="modal-actions">
         <button id="btn-shutdown-cancel" class="btn btn-ghost">キャンセル</button>
         <button id="btn-shutdown-confirm" class="btn btn-danger">停止する</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 元伝票詳細モーダル -->
+  <div id="slip-detail-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)guiSlipDetailClose()">
+    <div class="modal-box modal-box-lg" style="max-width:900px;width:95%;">
+      <h3 id="slip-detail-modal-title">奉行原本 伝票詳細</h3>
+      <div id="slip-detail-modal-body" style="overflow-x:auto;max-height:60vh;overflow-y:auto;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="guiSlipDetailClose()">閉じる</button>
       </div>
     </div>
   </div>
