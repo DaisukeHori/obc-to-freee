@@ -165,18 +165,6 @@ TAX_CODES_PURCHASE = [
     "共対仕入8%（軽）",
     "課対仕入（控80）10%",
     "課対仕入（控80）8%（軽）",
-    "共対仕入（控80)10%".replace("10%", "10%"),  # placeholder for consistency
-    "共対仕入（控80）8%（軽）",
-    "対象外",
-]
-# 上記の placeholder を修正
-TAX_CODES_PURCHASE = [
-    "課対仕入10%",
-    "課対仕入8%（軽）",
-    "共対仕入10%",
-    "共対仕入8%（軽）",
-    "課対仕入（控80）10%",
-    "課対仕入（控80）8%（軽）",
     "共対仕入（控80）10%",
     "共対仕入（控80）8%（軽）",
     "対象外",
@@ -885,20 +873,28 @@ def to_freee_row(r: dict,
     def _default_taxable(orig_code: str) -> str:
         return "課対仕入10%" if orig_code == "非課仕入" else "課税売上10%"
 
+    _VALID_TAX_TARGETS = set(TAX_CODES_PURCHASE) | set(TAX_CODES_SALES)
+
+    def _validated_target(tgt: str, orig_code: str) -> str:
+        """target_code が候補マスタに含まれていればそれを返す、含まれなければデフォルト 10%。"""
+        if tgt and tgt in _VALID_TAX_TARGETS:
+            return tgt
+        return _default_taxable(orig_code)
+
     # 借方側
     if dr_tax_code in ("非課仕入", "非課売上") and _parse_int(dr_tax_amount) != 0:
         act, tgt = _resolve_choice("借方")
         if act == "zero-tax":
             dr_tax_amount = "0"
         elif act == "change-to-taxable":
-            dr_tax_code = tgt if tgt else _default_taxable(dr_tax_code)
+            dr_tax_code = _validated_target(tgt, dr_tax_code)
     # 貸方側
     if cr_tax_code in ("非課仕入", "非課売上") and _parse_int(cr_tax_amount) != 0:
         act, tgt = _resolve_choice("貸方")
         if act == "zero-tax":
             cr_tax_amount = "0"
         elif act == "change-to-taxable":
-            cr_tax_code = tgt if tgt else _default_taxable(cr_tax_code)
+            cr_tax_code = _validated_target(tgt, cr_tax_code)
 
     return [
         "[明細行]",  # [表題行]
@@ -1462,8 +1458,7 @@ def dedup_partners(
                 print(f"  ({i}) コード {code} に統合", file=sys.stderr)
                 print(f"      → 仕訳 CSV の {others_str} を {code} に書き換え", file=sys.stderr)
                 print(f"      → 取引先マスタは「{name} / {code}」1 行のみ", file=sys.stderr)
-            print(f"  (3) 別名化" if len(codes) == 2 else f"  ({len(codes)+1}) 別名化", file=sys.stderr)
-            suffix_opt_num = len(codes) + 1
+            print(f"  ({len(codes)+1}) 別名化", file=sys.stderr)
             print(f"      → 取引先マスタは {len(codes)} 行: 使用回数多い方が元名、少ない方に _2 等を付与", file=sys.stderr)
             print(f"      → 仕訳 CSV のコードは変更しない (取引先名のみ書き換え)", file=sys.stderr)
             print(f"  (s) スキップ (取引先マスタから除外。手動で freee マスタ画面で対処)", file=sys.stderr)

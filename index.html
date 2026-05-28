@@ -794,28 +794,40 @@ function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonT
     const n = parseInt(s, 10);
     return isNaN(n) ? 0 : n;
   }
-  function resolveAction(side) {
-    if (nonTaxableStrategy === 'zero-tax' || nonTaxableStrategy === 'change-to-taxable') {
-      return nonTaxableStrategy;
+  function resolveChoice(side) {
+    // 戻り値: [action, targetCode] のタプル形式
+    if (nonTaxableStrategy === 'zero-tax') {
+      return ['zero-tax', null];
+    }
+    if (nonTaxableStrategy === 'change-to-taxable') {
+      return ['change-to-taxable', null];  // null = デフォルト 10% 適用
     }
     if ((nonTaxableStrategy === 'custom' || nonTaxableStrategy === 'interactive') && nonTaxableCustom) {
       const key = `${r.slipNo}_${side}`;
       const choice = nonTaxableCustom[key];
-      return choice ? (choice.action || 'keep') : 'keep';
+      if (choice) {
+        return [choice.action || 'keep', choice.target_code || null];
+      }
+      return ['keep', null];
     }
-    return 'keep';
+    return ['keep', null];
+  }
+  const VALID_TAX_TARGETS = new Set([...TAX_CODES_PURCHASE, ...TAX_CODES_SALES]);
+  function validatedTarget(tgt, origCode) {
+    if (tgt && VALID_TAX_TARGETS.has(tgt)) return tgt;
+    return (origCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
   }
   // 借方
   if ((drTaxCode === '非課仕入' || drTaxCode === '非課売上') && parseIntSafe(drTaxAmount) !== 0) {
-    const act = resolveAction('借方');
+    const [act, tgt] = resolveChoice('借方');
     if (act === 'zero-tax') drTaxAmount = '0';
-    else if (act === 'change-to-taxable') drTaxCode = (drTaxCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
+    else if (act === 'change-to-taxable') drTaxCode = validatedTarget(tgt, drTaxCode);
   }
   // 貸方
   if ((crTaxCode === '非課仕入' || crTaxCode === '非課売上') && parseIntSafe(crTaxAmount) !== 0) {
-    const act = resolveAction('貸方');
+    const [act, tgt] = resolveChoice('貸方');
     if (act === 'zero-tax') crTaxAmount = '0';
-    else if (act === 'change-to-taxable') crTaxCode = (crTaxCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
+    else if (act === 'change-to-taxable') crTaxCode = validatedTarget(tgt, crTaxCode);
   }
 
   return [
@@ -1550,7 +1562,7 @@ function showNonTaxableModal(mismatches) {
         `<option value="${escAttr(c)}"${i === 0 ? ' selected' : ''}>${escHtml(c)}${i === 0 ? ' (推奨)' : ''}</option>`
       ).join('');
       return `
-        <div class="dedup-card" data-key="${m.slip_no}_${m.side}" data-idx="${idx}">
+        <div class="dedup-card" data-key="${escAttr(m.slip_no + '_' + m.side)}" data-idx="${idx}">
           <div class="dedup-card-name">伝票 No.${escHtml(m.slip_no)} (${escHtml(m.date)}) ${escHtml(m.side)}</div>
           <div style="margin:8px 0; font-size:14px; color:#555">
             奉行原本: 税区分 <strong>${escHtml(m.tax_label)}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>

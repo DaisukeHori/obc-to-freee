@@ -734,11 +734,16 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             # stdout から JSON パース
+            # --detect-duplicates-only は先頭に「読み込み: ...」等のログ行を出力するため、
+            # { が始まる位置から JSON を抽出する (--detect-non-taxable-only と同様の処理)
             duplicates = []
             if result.returncode == 0 and result.stdout.strip():
                 try:
-                    detect_result = json.loads(result.stdout.strip())
-                    duplicates = detect_result.get("duplicates", [])
+                    stdout_text = result.stdout.strip()
+                    json_start = stdout_text.find("{")
+                    if json_start >= 0:
+                        detect_result = json.loads(stdout_text[json_start:])
+                        duplicates = detect_result.get("duplicates", [])
                 except Exception as e:
                     print(f"[GUI] detect JSON パース失敗: {e}")
 
@@ -808,6 +813,13 @@ class Handler(BaseHTTPRequestHandler):
         """
         try:
             content_length = int(self.headers.get("Content-Length", 0))
+            # JSON ボディは通常数 KB 程度。10MB を超える場合は不正リクエストとして拒否
+            if content_length > 10 * 1024 * 1024:
+                self._send_json({
+                    "success": False,
+                    "error": f"リクエストサイズが上限 (10MB) を超えています ({content_length // 1024 // 1024}MB)"
+                }, status=413)
+                return
             body = self.rfile.read(content_length)
             req = json.loads(body.decode("utf-8"))
 

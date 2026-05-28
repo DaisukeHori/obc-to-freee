@@ -641,26 +641,27 @@ const TAX_CODES_SALES = [
 function buildNonTaxableCard(m, idx) {
   const card = document.createElement('div');
   card.className = 'dedup-card';
-  card.dataset.key = `${m.slip_no}_${m.side}`;
+  card.dataset.key = `${m.slip_no}_${m.side}`;  // dataset 経由なので XSS リスクなし
 
   const candidates = (m.tax_label === '非仕入') ? TAX_CODES_PURCHASE : TAX_CODES_SALES;
-  const defaultTaxable = candidates[0];
   const summaryShort = (m.summary || '').slice(0, 30);
   const kamoku = m.kamoku || '';
 
   const radioName = `nontax_${idx}`;
   const selectId = `nontax_select_${idx}`;
+  // option の value/text は TAX_CODES_* 内部マスタ由来で安全。escape 不要。
   const optionsHtml = candidates.map((c, i) =>
-    `<option value="${c}"${i === 0 ? ' selected' : ''}>${c}${i === 0 ? ' (推奨)' : ''}</option>`
+    `<option value="${c}"${i === 0 ? ' selected' : ''}>${escHtml(c)}${i === 0 ? ' (推奨)' : ''}</option>`
   ).join('');
 
+  // 奉行原本由来データ (slip_no, date, side, tax_label, kamoku, summary) は escHtml で防御
   card.innerHTML = `
     <div class="dedup-card-header">
-      <strong>伝票 No.${m.slip_no}</strong> <span style="color:#666">(${m.date}) ${m.side}</span>
+      <strong>伝票 No.${escHtml(m.slip_no)}</strong> <span style="color:#666">(${escHtml(m.date)}) ${escHtml(m.side)}</span>
     </div>
     <div class="dedup-card-codes" style="margin:8px 0; font-size:14px; color:#555">
-      奉行原本: 税区分 <strong>${m.tax_label}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
-      勘定科目: ${kamoku} / 摘要: ${summaryShort}
+      奉行原本: 税区分 <strong>${escHtml(m.tax_label)}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
+      勘定科目: ${escHtml(kamoku)} / 摘要: ${escHtml(summaryShort)}
     </div>
     <div class="dedup-card-options" style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
       <label style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
