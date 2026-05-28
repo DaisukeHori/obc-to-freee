@@ -1689,7 +1689,8 @@ def dedup_partners(
         - deduped_partner_data: partner_data のコピーで partners を更新済み
         - code_rewrite_map: {古コード: 新コード} (merge 時のみ)
         - name_override_map: {コード: 表示名} (suffix 時および merge 時の名前確定)
-        - audit_log: [(name, [old_codes], action_desc, result_desc), ...]
+        - audit_log: [(name, [old_codes], action_desc, result_desc, usage_dict), ...]
+          usage_dict: {code: {"dr": int, "cr": int, "total": int}}
     """
     if strategy == "warn-only":
         return partner_data, {}, {}, []
@@ -1774,13 +1775,13 @@ def dedup_partners(
                     replaced_total = sum(usage[c]["total"] for c in eliminated)
                     action = f"({choice}) コード {adopted_code} に統合"
                     result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
-                    audit_log.append((name, old_codes, action, result))
+                    audit_log.append((name, old_codes, action, result, usage))
                     break
                 elif choice == str(suffix_num):
                     _apply_suffix(name, codes, usage, partners, name_override_map)
                     action = f"({suffix_num}) 別名化"
                     result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
-                    audit_log.append((name, old_codes, action, result))
+                    audit_log.append((name, old_codes, action, result, usage))
                     break
                 elif choice == "s":
                     for code in codes:
@@ -1788,7 +1789,7 @@ def dedup_partners(
                             del partners[code]
                     action = "(s) スキップ"
                     result = "マスタから除外、要手動対処"
-                    audit_log.append((name, old_codes, action, result))
+                    audit_log.append((name, old_codes, action, result, usage))
                     break
                 else:
                     print("不正な選択です。もう一度入力してください: ", end="", flush=True, file=sys.stderr)
@@ -1816,13 +1817,13 @@ def dedup_partners(
             replaced_total = sum(usage[c]["total"] for c in eliminated)
             action = f"コード {adopted_code} に統合 ({strategy})"
             result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
-            audit_log.append((name, old_codes, action, result))
+            audit_log.append((name, old_codes, action, result, usage))
 
         elif strategy == "suffix":
             _apply_suffix(name, codes, usage, partners, name_override_map)
             action = "別名化 (suffix)"
             result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
-            audit_log.append((name, old_codes, action, result))
+            audit_log.append((name, old_codes, action, result, usage))
 
         elif strategy == "custom":
             choice_entry = (custom_choices or {}).get(name, {})
@@ -1847,13 +1848,13 @@ def dedup_partners(
                 replaced_total = sum(usage[c]["total"] for c in eliminated)
                 action = f"コード {adopted_code} に統合 (custom)"
                 result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
-                audit_log.append((name, old_codes, action, result))
+                audit_log.append((name, old_codes, action, result, usage))
 
             elif c_action == "rename":
                 _apply_suffix(name, codes, usage, partners, name_override_map)
                 action = "別名化 (custom/rename)"
                 result = f"マスタに {len(codes)} 行 ({' / '.join(name_override_map.get(c, name) for c in codes)})"
-                audit_log.append((name, old_codes, action, result))
+                audit_log.append((name, old_codes, action, result, usage))
 
             elif c_action == "skip":
                 for code in codes:
@@ -1861,7 +1862,7 @@ def dedup_partners(
                         del partners[code]
                 action = "スキップ (custom)"
                 result = "マスタから除外"
-                audit_log.append((name, old_codes, action, result))
+                audit_log.append((name, old_codes, action, result, usage))
 
             else:
                 # 未知の action → merge-most-used 相当でフォールバック
@@ -1878,7 +1879,7 @@ def dedup_partners(
                 replaced_total = sum(usage[c]["total"] for c in eliminated)
                 action = f"コード {adopted_code} に統合 (custom/fallback)"
                 result = f"仕訳の {' / '.join(eliminated)} → {adopted_code} に置換 ({replaced_total} 件の仕訳が影響)"
-                audit_log.append((name, old_codes, action, result))
+                audit_log.append((name, old_codes, action, result, usage))
 
     # deduped_partner_data を構築
     deduped = dict(partner_data)
@@ -1907,9 +1908,15 @@ def print_dedup_audit(strategy: str, audit_log: list, partners: dict):
     print(sep, file=sys.stderr)
     print(f"処理した同名異コード: {len(audit_log)} 件", file=sys.stderr)
     print("", file=sys.stderr)
-    for (name, old_codes, action, result) in audit_log:
+    for entry in audit_log:
+        name, old_codes, action, result = entry[0], entry[1], entry[2], entry[3]
+        usage = entry[4] if len(entry) > 4 else {}
         print(f"  {name}:", file=sys.stderr)
         print(f"    元: コード {' / '.join(old_codes)}", file=sys.stderr)
+        for code in old_codes:
+            u = usage.get(code, {})
+            dr, cr, total = u.get("dr", 0), u.get("cr", 0), u.get("total", 0)
+            print(f"    使用件数: コード={code} 借方={dr} 貸方={cr} 合計={total}", file=sys.stderr)
         print(f"    選択: {action}", file=sys.stderr)
         print(f"    結果: {result}", file=sys.stderr)
         print("", file=sys.stderr)

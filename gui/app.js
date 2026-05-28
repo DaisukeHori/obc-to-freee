@@ -1077,16 +1077,16 @@ function renderResultSuccess(r) {
   // btn-sm style inline
   tbody.querySelectorAll('.btn-sm').forEach(b => { b.style.padding = '5px 10px'; b.style.fontSize = '12px'; });
 
+  // Store slip details for modal access (must be set before renderAuditSection uses it)
+  state.slipDetails = r.slipDetails || {};
+
   // Audit section
   renderAuditSection(s);
 
   // Dedup audit section
   if (r.dedupAudit && r.dedupAudit.length > 0) {
-    renderDedupAuditSection(r.dedupAudit);
+    renderDedupAuditSection(r.dedupAudit, r.outputs);
   }
-
-  // Store slip details for modal access
-  state.slipDetails = r.slipDetails || {};
 
   // Kauuri rebate results section
   if (r.kauuriRebateResults && r.kauuriRebateResults.length > 0) {
@@ -1227,18 +1227,26 @@ function renderAuditSection(s) {
   container.appendChild(wrapper);
 }
 
-function renderDedupAuditSection(dedupAudit) {
+function renderDedupAuditSection(dedupAudit, outputs) {
   // audit-section の後に dedup-result-section を挿入
   const auditSection = document.getElementById('audit-section');
   let dedupSection = document.getElementById('dedup-result-section');
   if (dedupSection) dedupSection.remove();
+  if (!dedupAudit || dedupAudit.length === 0) return;
+
+  // ダウンロードファイル名用
+  const firstOutput = outputs && outputs.length > 0 ? outputs[0].filename : '';
+  const baseName = firstOutput.replace(/\.[^.]+$/, '') || '変換結果';
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const csvFilename = `同名異コード対処結果_${baseName}_${today}.csv`;
 
   dedupSection = document.createElement('div');
   dedupSection.id = 'dedup-result-section';
   dedupSection.className = 'card dedup-result-section';
 
-  const titleHtml = document.createElement('div');
-  titleHtml.className = 'audit-item';
+  const titleItem = document.createElement('div');
+  titleItem.className = 'audit-item';
+
   const header = document.createElement('div');
   header.className = 'audit-item-header';
   header.innerHTML = `
@@ -1249,33 +1257,175 @@ function renderDedupAuditSection(dedupAudit) {
     </svg>`;
 
   const body = document.createElement('div');
-  body.className = 'audit-item-body';
+  body.className = 'audit-item-body open';
+
+  // ダウンロード + テキストエリアボタン行
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+
+  const btnDl = document.createElement('a');
+  btnDl.className = 'btn btn-success btn-sm';
+  btnDl.style.cssText = 'padding:6px 14px;font-size:13px;cursor:pointer;';
+  btnDl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </svg>CSVダウンロード`;
+  btnDl.setAttribute('download', csvFilename);
+  btnDl.addEventListener('click', (e) => {
+    e.preventDefault();
+    const csvContent = buildDedupCsv(dedupAudit);
+    const bom = '﻿';
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn btn-ghost btn-sm';
+  btnCopy.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnCopy.textContent = 'テキストエリアを開く / 閉じる';
+  let taVisible = false;
+  const ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.rows = 8;
+  ta.style.cssText = 'width:100%;font-size:12px;font-family:monospace;margin-top:8px;display:none;resize:vertical;';
+  ta.value = buildDedupTabText(dedupAudit);
+  btnCopy.addEventListener('click', () => {
+    taVisible = !taVisible;
+    ta.style.display = taVisible ? 'block' : 'none';
+    if (taVisible) ta.select();
+  });
+
+  btnRow.appendChild(btnDl);
+  btnRow.appendChild(btnCopy);
+  body.appendChild(btnRow);
+  body.appendChild(ta);
+
+  // 詳細テーブル
   const table = document.createElement('table');
   table.innerHTML = `
-    <thead><tr><th>取引先名</th><th>元コード</th><th>対処内容</th><th>結果</th></tr></thead>`;
+    <thead><tr>
+      <th>取引先名</th><th>統合方針</th><th>借方件数</th><th>貸方件数</th><th>合計件数</th>
+      <th>該当全コード</th><th>結果</th>
+    </tr></thead>`;
   const tbody = document.createElement('tbody');
   dedupAudit.forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    // 統合先コードを action テキストから抽出 (例: "コード 742001 に統合 (custom)")
+    const mergeMatch = (entry.action || '').match(/コード\s+(\S+)\s+に統合/);
+    const targetCode = mergeMatch ? mergeMatch[1] : '';
+    // 合計使用件数 (全コード合算)
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    // 該当全コード一覧 (コード(N件) 形式)
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${escHtml(entry.name || '')}</td>
-      <td class="dedup-result-codes">${escHtml((entry.oldCodes || []).join(' / '))}</td>
       <td>${escHtml(entry.action || '')}</td>
+      <td style="text-align:right">${totalDr > 0 || totalAll > 0 ? totalDr : ''}</td>
+      <td style="text-align:right">${totalCr > 0 || totalAll > 0 ? totalCr : ''}</td>
+      <td style="text-align:right">${totalAll > 0 ? totalAll : ''}</td>
+      <td style="font-size:12px">${escHtml(codesStr)}</td>
       <td>${escHtml(entry.result || '')}</td>`;
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
   body.appendChild(table);
 
+  // トグル
   const chevron = header.querySelector('svg');
   header.addEventListener('click', () => {
     const open = body.classList.toggle('open');
     chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
   });
+  chevron.style.transform = 'rotate(180deg)'; // 初期展開状態
 
-  titleHtml.appendChild(header);
-  titleHtml.appendChild(body);
-  dedupSection.appendChild(titleHtml);
+  titleItem.appendChild(header);
+  titleItem.appendChild(body);
+  dedupSection.appendChild(titleItem);
   auditSection.parentNode.insertBefore(dedupSection, auditSection.nextSibling);
+}
+
+function buildDedupCsv(dedupAudit) {
+  const headers = ['取引先名', '統合方針', '借方件数', '貸方件数', '合計件数', '該当全コード', '結果'];
+  const lines = [headers.join(',')];
+  (dedupAudit || []).forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
+    const cells = [
+      entry.name    || '',
+      entry.action  || '',
+      totalDr  > 0 || totalAll > 0 ? String(totalDr)  : '',
+      totalCr  > 0 || totalAll > 0 ? String(totalCr)  : '',
+      totalAll > 0 ? String(totalAll) : '',
+      codesStr,
+      entry.result  || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildDedupTabText(dedupAudit) {
+  const headers = ['取引先名', '統合方針', '借方件数', '貸方件数', '合計件数', '該当全コード', '結果'];
+  const lines = [headers.join('\t')];
+  (dedupAudit || []).forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
+    lines.push([
+      entry.name    || '',
+      entry.action  || '',
+      totalDr  > 0 || totalAll > 0 ? String(totalDr)  : '',
+      totalCr  > 0 || totalAll > 0 ? String(totalCr)  : '',
+      totalAll > 0 ? String(totalAll) : '',
+      codesStr,
+      entry.result  || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
 }
 
 function renderKauuriRebateResultsSection(results, outputs) {
