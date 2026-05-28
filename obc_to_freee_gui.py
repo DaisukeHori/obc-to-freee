@@ -52,7 +52,7 @@ DEFAULT_SETTINGS = {
 }
 
 UPLOAD_TTL_DAYS = 7  # デフォルト TTL (--upload-ttl-days で変更可)
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
+MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB (多年分一括変換のケースを考慮)
 TOKEN_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$')
 
 # ---------------------------------------------------------------------------
@@ -813,13 +813,6 @@ class Handler(BaseHTTPRequestHandler):
         """
         try:
             content_length = int(self.headers.get("Content-Length", 0))
-            # JSON ボディは通常数 KB 程度。10MB を超える場合は不正リクエストとして拒否
-            if content_length > 10 * 1024 * 1024:
-                self._send_json({
-                    "success": False,
-                    "error": f"リクエストサイズが上限 (10MB) を超えています ({content_length // 1024 // 1024}MB)"
-                }, status=413)
-                return
             body = self.rfile.read(content_length)
             req = json.loads(body.decode("utf-8"))
 
