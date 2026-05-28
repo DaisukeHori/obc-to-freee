@@ -723,7 +723,7 @@ function initDedupModal() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = `同名異コード一覧_${today}.csv`; a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
 
@@ -832,7 +832,7 @@ const TAX_CODES_SALES = [
 function buildNonTaxableCard(m, idx) {
   const card = document.createElement('div');
   card.className = 'dedup-card';
-  card.dataset.key = `${m.slip_no}_${m.side}`;  // dataset 経由なので XSS リスクなし
+  card.dataset.key = `${m.slip_no}_${m.date}_${m.side}`;  // dataset 経由なので XSS リスクなし
 
   // 非仕入は今回の修正で非対仕入10%に自動変換されるためここには来ない → 常に TAX_CODES_SALES
   const candidates = TAX_CODES_SALES;
@@ -908,7 +908,7 @@ function initNonTaxableModal() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = `非課税税額矛盾一覧_${today}.csv`; a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
 
@@ -1091,7 +1091,7 @@ function initKauuriModal() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = `課売上マイナス起票一覧_${today}.csv`; a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
 
@@ -1613,7 +1613,8 @@ function renderKauuriRebateResultsSection(results, outputs) {
   titleItem.appendChild(header);
   titleItem.appendChild(body);
   section.appendChild(titleItem);
-  auditSection.parentNode.insertBefore(section, auditSection.nextSibling);
+  const anchor = document.getElementById('dedup-result-section') || auditSection;
+  anchor.parentNode.insertBefore(section, anchor.nextSibling);
 }
 
 function renderNonTaxableResultsSection(results, outputs) {
@@ -2004,13 +2005,13 @@ function guiBuildDedupModalTabText(duplicates) {
 
 // GUI 版 nontax モーダル: mismatches = [{slip_no, date, side, tax_label, amount, tax_amount, summary, kamoku}]
 function guiBuildNontaxModalCsv(mismatches) {
-  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
   const lines = [headers.join(',')];
   (mismatches || []).forEach(m => {
     const cells = [
       m.slip_no || '', m.date || '', m.side || '',
-      m.kamoku || '', '',
-      String(m.amount || ''), String(m.tax_amount || ''),
+      m.kamoku || '',
+      m.amount == null ? '' : String(m.amount), m.tax_amount == null ? '' : String(m.tax_amount),
       m.tax_label || '', m.summary || '',
     ].map(v => `"${String(v).replace(/"/g, '""')}"`);
     lines.push(cells.join(','));
@@ -2019,13 +2020,13 @@ function guiBuildNontaxModalCsv(mismatches) {
 }
 
 function guiBuildNontaxModalTabText(mismatches) {
-  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
   const lines = [headers.join('\t')];
   (mismatches || []).forEach(m => {
     lines.push([
       m.slip_no || '', m.date || '', m.side || '',
-      m.kamoku || '', '',
-      String(m.amount || ''), String(m.tax_amount || ''),
+      m.kamoku || '',
+      m.amount == null ? '' : String(m.amount), m.tax_amount == null ? '' : String(m.tax_amount),
       m.tax_label || '', m.summary || '',
     ].join('\t'));
   });
@@ -2041,7 +2042,7 @@ function guiBuildKauuriModalCsv(mismatches) {
     const cells = [
       m.slip_no || '', m.date || '', m.side || '',
       m.orig_kamoku || '',
-      String(m.amount || ''), '',
+      m.amount == null ? '' : String(m.amount), '',
       taxLabel, m.summary || '',
     ].map(v => `"${String(v).replace(/"/g, '""')}"`);
     lines.push(cells.join(','));
@@ -2057,7 +2058,7 @@ function guiBuildKauuriModalTabText(mismatches) {
     lines.push([
       m.slip_no || '', m.date || '', m.side || '',
       m.orig_kamoku || '',
-      String(m.amount || ''), '',
+      m.amount == null ? '' : String(m.amount), '',
       taxLabel, m.summary || '',
     ].join('\t'));
   });
