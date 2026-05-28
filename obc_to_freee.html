@@ -2673,7 +2673,7 @@ function renderAuditSections(r) {
   // 伝票No セル: クリックでモーダルを開く (allGroups があれば)
   function slipNoCell(slipNo, date) {
     if (!hasSlipDetails) return escHtml(slipNo);
-    return `<button class="slip-detail-btn" onclick="showSlipDetail(${JSON.stringify(slipNo)},${JSON.stringify(date)})">${escHtml(slipNo)}</button>`;
+    return `<button class="slip-detail-btn" onclick="showSlipDetail(${escHtml(JSON.stringify(slipNo))},${escHtml(JSON.stringify(date))})">${escHtml(slipNo)}</button>`;
   }
 
   // 1. 借貸不一致 (奉行原本)
