@@ -200,6 +200,19 @@
   .radio-options label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; padding: 4px; border-radius: 4px; }
   .radio-options label:hover { background: var(--gray-50); }
 
+  /* 元伝票詳細ボタン (監査テーブル内) */
+  .slip-detail-btn { background: none; border: none; color: var(--blue); cursor: pointer;
+    font-size: 13px; font-weight: 500; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
+  .slip-detail-btn:hover { color: var(--blue-dark); }
+
+  /* 元伝票詳細モーダル テーブル */
+  .slip-detail-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .slip-detail-table th { background: var(--gray-100); padding: 5px 8px; text-align: left; font-weight: 600; white-space: nowrap; }
+  .slip-detail-table td { padding: 5px 8px; border-bottom: 1px solid var(--gray-100); white-space: nowrap; }
+  .slip-detail-table tr:last-child td { border-bottom: none; }
+  .slip-detail-table .side-dr { color: #1d4ed8; font-weight: 600; }
+  .slip-detail-table .side-cr { color: #15803d; font-weight: 600; }
+
   /* History */
   .history-item { padding: 12px; border: 1px solid var(--gray-200); border-radius: 6px;
     margin-bottom: 8px; display: flex; align-items: flex-start; gap: 12px; }
@@ -349,6 +362,32 @@
               <small style="color:#666;">奉行原本で「非売上」なのに税額がある矛盾起票の対処。freee は「非課売上では税額を入力できません」エラーになるため対応が必要。（「非仕入」は「非対仕入10%」等に自動変換されるため対象外）</small>
             </div>
           </div>
+          <div class="options-group-box" style="margin-top:16px;">
+            <div class="form-group">
+              <label>課売上+マイナス起票の対処方法</label>
+              <select id="opt-kauuri-rebate-strategy" onchange="toggleKauuriRebateOptions()">
+                <option value="warn-only">警告のみ (変換なし、デフォルト)</option>
+                <option value="auto-rebate">自動: 振替伝票形式に変換 (推奨・借方移動+符号反転+課税売返)</option>
+                <option value="custom">対話: 1件ずつ確認</option>
+              </select>
+              <small style="color:#666;">「課売上」+マイナス起票 (返品/値引き) を freee 公式サンプル CSV 準拠の振替伝票形式に自動変換します。</small>
+            </div>
+            <div id="kauuri-rebate-kamoku-box" style="display:none;">
+              <div class="form-group">
+                <label>振替先勘定科目</label>
+                <select id="opt-kauuri-rebate-kamoku" onchange="toggleKauuriCustomKamoku()">
+                  <option value="売上値引高">売上値引高 (推奨・freee公式サンプル準拠)</option>
+                  <option value="売上戻り高">売上戻り高</option>
+                  <option value="__original__">奉行原本の科目をそのまま使用</option>
+                  <option value="__custom__">カスタム入力</option>
+                </select>
+              </div>
+              <div id="kauuri-custom-kamoku-box" style="display:none;" class="form-group">
+                <label>カスタム勘定科目名</label>
+                <input type="text" id="opt-kauuri-custom-kamoku" placeholder="例: 売上控除" style="font-family:monospace;">
+              </div>
+            </div>
+          </div>
           <div style="margin-top:16px; display:flex; gap:8px;">
             <button class="btn btn-secondary" onclick="goToStep1()">← 戻る</button>
             <button class="btn btn-primary" id="btn-execute" onclick="executeConversion()">変換実行</button>
@@ -456,6 +495,38 @@
         <button class="btn btn-secondary btn-sm" onclick="nontaxAutoAll()">全件 課対仕入10%/課税売上10% に変更</button>
         <button class="btn btn-primary" onclick="nontaxConfirm()">決定して変換実行</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 課売返振替 custom 対話モーダル -->
+<div class="modal-overlay" id="kauuri-modal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">課売上+マイナス起票の振替判断</div>
+    </div>
+    <div class="modal-body" id="kauuri-modal-body">
+      <p style="font-size:14px;color:#555;margin-bottom:12px;">以下の課売上マイナス起票について、どう振替するか選択してください。</p>
+    </div>
+    <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="kauuriCancel()">← 戻る</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" onclick="kauuriAutoAll()">全件 自動推奨で決定</button>
+        <button class="btn btn-primary" onclick="kauuriConfirm()">次へ (確定)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 元伝票詳細モーダル -->
+<div class="modal-overlay" id="slip-detail-modal" style="display:none;" onclick="if(event.target===this)slipDetailClose()">
+  <div class="modal" style="max-width:900px;width:95%;">
+    <div class="modal-header">
+      <div class="modal-title" id="slip-detail-modal-title">奉行原本 伝票詳細</div>
+    </div>
+    <div class="modal-body" id="slip-detail-modal-body" style="max-height:60vh;overflow-y:auto;"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="slipDetailClose()">閉じる</button>
     </div>
   </div>
 </div>
@@ -972,7 +1043,7 @@ function auditObcSource(allGroups, dateFrom, dateTo) {
     }
   }
 
-  // 非課税+税額矛盾: 非売上 (3/3) と 非仕入 (業務確認用) に分離
+  // 非課税+税額矛盾: 非売上 (非課売上区分) と 非仕入 (業務確認用) に分離
   const nonTaxableAll = detectNonTaxableFromGroups(allGroups);
   const nonTaxableSales     = nonTaxableAll.filter(m => m.tax_label === '非売上');
   const businessReview      = nonTaxableAll.filter(m => m.tax_label === '非仕入');
@@ -1314,7 +1385,7 @@ async function executeConversion() {
 
   try {
     // ファイル読込
-    const allGroups = new Map();
+    let allGroups = new Map();
     let totalInput = 0;
     const errors = {tax: [], amount: [], balance: [], dateFormat: []};
 
@@ -1386,6 +1457,40 @@ async function executeConversion() {
         ({partnerData, codeRewriteMap, nameOverrideMap, auditLog: dedupAuditLog} =
           applyDedupStrategy(partnerData, opts.dedupStrategy, null));
       }
+    }
+
+    // 課売返振替: auto-rebate / custom 時は変換
+    // 振替前スナップショット (奉行原本データ保持用)
+    let originalGroups = structuredClone(allGroups);
+    let kauuriRebateLog = [];
+    if (opts.kauuriRebateStrategy === 'auto-rebate') {
+      const kauuri = applyKauuriRebate(allGroups, {
+        strategy: 'auto-rebate',
+        rebateKamoku: opts.kauuriRebateKamoku,
+        customChoices: {},
+      });
+      allGroups = kauuri.updatedGroups;
+      kauuriRebateLog = kauuri.rebateLog;
+    } else if (opts.kauuriRebateStrategy === 'custom') {
+      // custom: 候補検出 → モーダル → 件別選択
+      const kauuriCandidates = detectKauuriCandidates(allGroups);
+      let kauuriCustomChoices = {};
+      if (kauuriCandidates.length > 0) {
+        const modalResult = await showKauuriModal(kauuriCandidates, opts.kauuriRebateKamoku);
+        if (modalResult === null) {
+          // ユーザーキャンセル → Step 2 に戻る
+          goToStep2();
+          return;
+        }
+        kauuriCustomChoices = modalResult;
+      }
+      const kauuri = applyKauuriRebate(allGroups, {
+        strategy: 'custom',
+        rebateKamoku: opts.kauuriRebateKamoku,
+        customChoices: kauuriCustomChoices,
+      });
+      allGroups = kauuri.updatedGroups;
+      kauuriRebateLog = kauuri.rebateLog;
     }
 
     // 非課税+税額矛盾の interactive/custom 戦略: モーダルでユーザーに選ばせる
@@ -1464,6 +1569,7 @@ async function executeConversion() {
       slipCount: allGroups.size, partnerData, dedupAuditLog,
       errors, balanceResult, auditResult, totalSkipped,
       nonTaxableResults: nonTaxableResultsCollector,
+      kauuriRebateLog, allGroups, originalGroups,
       opts
     };
 
@@ -1487,6 +1593,20 @@ function getOptions() {
   const knownMismatches = new Set(
     knownMismatchesRaw.split(',').map(s => s.trim()).filter(s => s.length > 0)
   );
+  // 課売返振替の勘定科目解決
+  const kauuriRebateStrategy = (document.getElementById('opt-kauuri-rebate-strategy') || {value: 'warn-only'}).value;
+  let kauuriRebateKamoku = '売上値引高';
+  const kauuriSel = document.getElementById('opt-kauuri-rebate-kamoku');
+  if (kauuriSel) {
+    const v = kauuriSel.value;
+    if (v === '__custom__') {
+      kauuriRebateKamoku = (document.getElementById('opt-kauuri-custom-kamoku') || {value: ''}).value.trim() || '売上値引高';
+    } else if (v === '__original__') {
+      kauuriRebateKamoku = '__original__'; // 特殊値: 変換ロジックで処理
+    } else {
+      kauuriRebateKamoku = v;
+    }
+  }
   return {
     prefix: document.getElementById('opt-prefix').value || 'freee用_仕訳データ_obc変換',
     rowsPerFile: Math.max(100, parseInt(document.getElementById('opt-rows-per-file').value) || 10000),
@@ -1498,7 +1618,279 @@ function getOptions() {
     nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'warn-only'}).value,
     nonTaxableCustom: null,  // モーダル UI が実装されたら設定される
     knownMismatches,
+    kauuriRebateStrategy,
+    kauuriRebateKamoku,
   };
+}
+
+function toggleKauuriRebateOptions() {
+  const strat = (document.getElementById('opt-kauuri-rebate-strategy') || {value: 'warn-only'}).value;
+  const box = document.getElementById('kauuri-rebate-kamoku-box');
+  if (box) box.style.display = (strat === 'auto-rebate' || strat === 'custom') ? '' : 'none';
+}
+
+function toggleKauuriCustomKamoku() {
+  const sel = document.getElementById('opt-kauuri-rebate-kamoku');
+  const box = document.getElementById('kauuri-custom-kamoku-box');
+  if (sel && box) box.style.display = (sel.value === '__custom__') ? '' : 'none';
+}
+
+// ===========================================================================
+// 元伝票詳細モーダル (Modification 1)
+// ===========================================================================
+
+function showSlipDetail(slipNo, date) {
+  if (!conversionResult || !conversionResult.originalGroups) return;
+  const allGroups = conversionResult.originalGroups;
+
+  // date\tslipNo キーで検索
+  const key = date + '\t' + slipNo;
+  let rows = allGroups.get(key);
+
+  // キー不一致のフォールバック: slipNo のみで走査
+  if (!rows || rows.length === 0) {
+    for (const [k, v] of allGroups) {
+      if (k.split('\t')[1] === slipNo) { rows = v; break; }
+    }
+  }
+
+  const modal = document.getElementById('slip-detail-modal');
+  const title = document.getElementById('slip-detail-modal-title');
+  const body  = document.getElementById('slip-detail-modal-body');
+
+  title.textContent = `奉行原本 伝票詳細 — No.${slipNo}  (${date})`;
+
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<p style="color:var(--gray-500);">データが見つかりません。</p>';
+    modal.style.display = 'flex';
+    return;
+  }
+
+  // 行ごとに借方/貸方を整理して表示
+  // drTaxLabelRaw = 奉行原本の税区分略称 (変換前), drTaxCode = freee変換後税区分
+  const headings = ['側', '勘定科目', '補助科目', '部門', '奉行原本税区分', 'freee税区分', '金額', '税額', '取引先', '摘要'];
+  const trs = [];
+  for (const r of rows) {
+    // 借方側
+    const drActive = r.drKamoku || r.drAmount;
+    if (drActive) {
+      trs.push(`<tr>
+        <td class="side-dr">借方</td>
+        <td>${escHtml(r.drKamoku||'')}</td>
+        <td>${escHtml(r.drHojo||'')}</td>
+        <td>${escHtml(r.drBumon||'')}</td>
+        <td>${escHtml(r.drTaxLabelRaw||r.drTaxLabel||'')}</td>
+        <td style="color:#888;font-size:11px">${escHtml(r.drTaxCode||'')}</td>
+        <td style="text-align:right">${escHtml(String(r.drAmount||''))}</td>
+        <td style="text-align:right">${escHtml(String(r.drTaxAmount||''))}</td>
+        <td>${escHtml(r.drPartner||'')}</td>
+        <td>${escHtml((r.summary||'').slice(0,40))}</td>
+      </tr>`);
+    }
+    // 貸方側
+    const crActive = r.crKamoku || r.crAmount;
+    if (crActive) {
+      trs.push(`<tr>
+        <td class="side-cr">貸方</td>
+        <td>${escHtml(r.crKamoku||'')}</td>
+        <td>${escHtml(r.crHojo||'')}</td>
+        <td>${escHtml(r.crBumon||'')}</td>
+        <td>${escHtml(r.crTaxLabelRaw||r.crTaxLabel||'')}</td>
+        <td style="color:#888;font-size:11px">${escHtml(r.crTaxCode||'')}</td>
+        <td style="text-align:right">${escHtml(String(r.crAmount||''))}</td>
+        <td style="text-align:right">${escHtml(String(r.crTaxAmount||''))}</td>
+        <td>${escHtml(r.crPartner||'')}</td>
+        <td>${escHtml((r.summary||'').slice(0,40))}</td>
+      </tr>`);
+    }
+  }
+
+  body.innerHTML = `
+    <table class="slip-detail-table">
+      <thead><tr>${headings.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
+      <tbody>${trs.join('')}</tbody>
+    </table>`;
+
+  modal.style.display = 'flex';
+}
+
+function slipDetailClose() {
+  const modal = document.getElementById('slip-detail-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+// ===========================================================================
+// 課売返振替変換 (applyKauuriRebate)
+// ===========================================================================
+
+/**
+ * allGroups (Map: key → rows) を走査し、課売上+マイナス行を振替伝票形式に変換する。
+ * strategy: 'warn-only' | 'auto-rebate' | 'interactive'(=custom)
+ * rebateKamoku: 変換後の勘定科目。'__original__' は元科目を継承
+ * customChoices: { "slipNo_date_side": { action: "auto-rebate"|"keep", kamoku?: string } }
+ * 戻り値: { updatedGroups: Map, rebateLog: Array }
+ */
+function applyKauuriRebate(allGroups, opts) {
+  const strategy     = (opts && opts.strategy)     || 'warn-only';
+  const rebateKamoku = (opts && opts.rebateKamoku) || '売上値引高';
+  const customChoices= (opts && opts.customChoices)|| {};
+
+  if (strategy === 'warn-only') return { updatedGroups: allGroups, rebateLog: [] };
+
+  const REBATE_TAX_MAP = {
+    '10': '課税売返10%',
+    '8':  '課税売返8%（軽）',
+    '0':  '課税売返10%',
+    '':   '課税売返10%',
+  };
+
+  function taxRate(taxCode) {
+    return (taxCode || '').includes('8%') ? '8' : '10';
+  }
+
+  const updatedGroups = new Map();
+  const rebateLog = [];
+
+  for (const [key, slipRows] of allGroups) {
+    const newRows = [];
+    for (const r of slipRows) {
+      const drInt = parseInt(String(r.drAmount ?? '').trim() || '0', 10) || 0;
+      const crInt = parseInt(String(r.crAmount ?? '').trim() || '0', 10) || 0;
+
+      const drIsKauuriMinus = (
+        (r.drTaxCode === '課税売上10%' || r.drTaxCode === '課税売上8%（軽）')
+        && drInt < 0
+      );
+      const crIsKauuriMinus = (
+        (r.crTaxCode === '課税売上10%' || r.crTaxCode === '課税売上8%（軽）')
+        && crInt < 0
+      );
+
+      if (!drIsKauuriMinus && !crIsKauuriMinus) {
+        newRows.push(r);
+        continue;
+      }
+
+      const side    = drIsKauuriMinus ? '借方' : '貸方';
+      const slipNo  = r.slipNo || '';
+      const date    = r.date   || '';
+
+      // custom/interactive 選択を解決
+      let action     = 'auto-rebate';
+      let useKamoku  = rebateKamoku;
+      if (strategy === 'interactive' || strategy === 'custom') {
+        const choiceKey = `${slipNo}_${date}_${side}`;
+        const choice    = customChoices[choiceKey] || { action: 'keep' };
+        action    = choice.action    || 'keep';
+        useKamoku = choice.kamoku != null ? choice.kamoku : rebateKamoku;
+      }
+
+      if (action === 'keep') {
+        newRows.push(r);
+        const sideCode = side === '借方' ? r.drTaxCode : r.crTaxCode;
+        rebateLog.push({
+          slip_no: slipNo, date, side,
+          orig_kamoku: side === '借方' ? r.drKamoku : r.crKamoku,
+          orig_amount: side === '借方' ? drInt : crInt,
+          tax_rate: taxRate(sideCode),
+          result_kamoku: '', result_tax_code: '', action: 'keep',
+        });
+        continue;
+      }
+
+      // auto-rebate: 変換実行
+      const row = Object.assign({}, r);
+      if (side === '借方') {
+        const origKamoku = row.drKamoku;
+        const origAmount = drInt;
+        const tCode      = row.drTaxCode;
+        const tRate      = taxRate(tCode);
+        const rebateTax  = REBATE_TAX_MAP[tRate] || '課税売返10%';
+        const finalKamoku = useKamoku === '__original__' ? origKamoku : useKamoku;
+        // Critical-3: 元の貸方側が有効な場合、対側行を別途保持
+        const crKamokuOrig = row.crKamoku;
+        const crAmountOrig = crInt;
+        const hasValidCr = !!crKamokuOrig && crAmountOrig !== 0;
+        // 貸方に設定 (符号反転)
+        row.crKamoku      = finalKamoku;
+        row.crAmount      = String(Math.abs(origAmount));
+        row.crTaxCode     = rebateTax;
+        row.crTaxLabel    = rebateTax;
+        // Critical-2: 税額も abs() で正数化
+        row.crTaxAmount   = String(Math.abs(parseInt(row.drTaxAmount || '0', 10) || 0));
+        row.crHojo        = '';
+        row.crBumon       = row.drBumon;
+        row.crPartner     = row.drPartner;
+        row.crPartnerCode = row.drPartnerCode;
+        // 借方を空欄化
+        row.drKamoku = ''; row.drAmount = ''; row.drTaxCode = '';
+        row.drTaxLabel = ''; row.drTaxAmount = '';
+        row.drHojo = ''; row.drBumon = '';
+        row.drPartner = ''; row.drPartnerCode = '';
+        rebateLog.push({
+          slip_no: slipNo, date, side, orig_kamoku: origKamoku,
+          orig_amount: origAmount, tax_rate: tRate,
+          result_kamoku: finalKamoku, result_tax_code: rebateTax, action: 'auto-rebate',
+        });
+        newRows.push(row);
+        // Critical-3: 元の貸方側が有効だった場合、対側行を別行として保持
+        if (hasValidCr) {
+          const preserveRow = Object.assign({}, r);
+          preserveRow.drKamoku = ''; preserveRow.drAmount = ''; preserveRow.drTaxCode = '';
+          preserveRow.drTaxLabel = ''; preserveRow.drTaxAmount = '';
+          preserveRow.drHojo = ''; preserveRow.drBumon = '';
+          preserveRow.drPartner = ''; preserveRow.drPartnerCode = '';
+          newRows.push(preserveRow);
+        }
+      } else {
+        const origKamoku = row.crKamoku;
+        const origAmount = crInt;
+        const tCode      = row.crTaxCode;
+        const tRate      = taxRate(tCode);
+        const rebateTax  = REBATE_TAX_MAP[tRate] || '課税売返10%';
+        const finalKamoku = useKamoku === '__original__' ? origKamoku : useKamoku;
+        // Critical-3: 元の借方側が有効な場合、対側行を別途保持
+        const drKamokuOrig = row.drKamoku;
+        const drAmountOrig = drInt;
+        const hasValidDr = !!drKamokuOrig && drAmountOrig !== 0;
+        // 借方に設定 (符号反転)
+        row.drKamoku      = finalKamoku;
+        row.drAmount      = String(Math.abs(origAmount));
+        row.drTaxCode     = rebateTax;
+        row.drTaxLabel    = rebateTax;
+        // Critical-2: 税額も abs() で正数化
+        row.drTaxAmount   = String(Math.abs(parseInt(row.crTaxAmount || '0', 10) || 0));
+        row.drHojo        = '';
+        row.drBumon       = row.crBumon;
+        row.drPartner     = row.crPartner;
+        row.drPartnerCode = row.crPartnerCode;
+        // 貸方を空欄化
+        row.crKamoku = ''; row.crAmount = ''; row.crTaxCode = '';
+        row.crTaxLabel = ''; row.crTaxAmount = '';
+        row.crHojo = ''; row.crBumon = '';
+        row.crPartner = ''; row.crPartnerCode = '';
+        rebateLog.push({
+          slip_no: slipNo, date, side, orig_kamoku: origKamoku,
+          orig_amount: origAmount, tax_rate: tRate,
+          result_kamoku: finalKamoku, result_tax_code: rebateTax, action: 'auto-rebate',
+        });
+        newRows.push(row);
+        // Critical-3: 元の借方側が有効だった場合、対側行を別行として保持
+        if (hasValidDr) {
+          const preserveRow = Object.assign({}, r);
+          preserveRow.crKamoku = ''; preserveRow.crAmount = ''; preserveRow.crTaxCode = '';
+          preserveRow.crTaxLabel = ''; preserveRow.crTaxAmount = '';
+          preserveRow.crHojo = ''; preserveRow.crBumon = '';
+          preserveRow.crPartner = ''; preserveRow.crPartnerCode = '';
+          newRows.push(preserveRow);
+        }
+      }
+      // Critical-3 対応のため newRows.push(row) は上の各ブランチで実行済
+    }
+    updatedGroups.set(key, newRows);
+  }
+
+  return { updatedGroups, rebateLog };
 }
 
 // ===========================================================================
@@ -1765,6 +2157,163 @@ function nontaxCancel() {
 }
 
 // ===========================================================================
+// 課売返振替 custom 対話モーダル
+// ===========================================================================
+
+/**
+ * allGroups から課売上+マイナス行を検出して候補リストを返す。
+ * 戻り値: [{slip_no, date, side, orig_kamoku, amount, tax_rate, summary}, ...]
+ */
+function detectKauuriCandidates(allGroups) {
+  const results = [];
+  for (const [key, rows] of allGroups) {
+    for (const r of rows) {
+      const drInt = parseInt(String(r.drAmount ?? '').trim() || '0', 10) || 0;
+      const crInt = parseInt(String(r.crAmount ?? '').trim() || '0', 10) || 0;
+      if ((r.drTaxCode === '課税売上10%' || r.drTaxCode === '課税売上8%（軽）') && drInt < 0) {
+        const tRate = (r.drTaxCode || '').includes('8%') ? '8' : '10';
+        results.push({
+          slip_no: r.slipNo || '', date: r.date || '', side: '借方',
+          orig_kamoku: r.drKamoku || '',
+          amount: drInt, tax_rate: tRate,
+          summary: r.summary || '',
+        });
+      }
+      if ((r.crTaxCode === '課税売上10%' || r.crTaxCode === '課税売上8%（軽）') && crInt < 0) {
+        const tRate = (r.crTaxCode || '').includes('8%') ? '8' : '10';
+        results.push({
+          slip_no: r.slipNo || '', date: r.date || '', side: '貸方',
+          orig_kamoku: r.crKamoku || '',
+          amount: crInt, tax_rate: tRate,
+          summary: r.summary || '',
+        });
+      }
+    }
+  }
+  return results;
+}
+
+const KAMOKU_OPTIONS = ['売上値引高', '売上戻り高', '奉行原本科目を維持'];
+
+/**
+ * 課売返振替 custom モーダルを表示し、ユーザーの選択を Promise で返す。
+ * 戻り値: { "slipNo_date_side": { action: "auto-rebate"|"keep", kamoku: "..." } } | null (キャンセル)
+ * defaultKamoku: auto-rebate のデフォルト勘定科目
+ */
+function showKauuriModal(candidates, defaultKamoku) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('kauuri-modal');
+    const body  = document.getElementById('kauuri-modal-body');
+
+    body.innerHTML = '<p style="font-size:14px;color:#555;margin-bottom:12px;">以下の課売上マイナス起票について、どう振替するか選択してください。</p>'
+      + candidates.map((m, idx) => {
+      const choiceKey = `${m.slip_no}_${m.date}_${m.side}`;
+      const radioName = `kauuri_${idx}`;
+      const summaryShort = (m.summary || '').slice(0, 30);
+      const kamokuOptions = KAMOKU_OPTIONS.map((k, i) => {
+        const val = k === '奉行原本科目を維持' ? '__original__' : k;
+        const isDefault = (defaultKamoku === val) || (i === 0 && defaultKamoku !== '__original__' && defaultKamoku !== '売上戻り高');
+        return `<option value="${escAttr(val)}"${isDefault ? ' selected' : ''}>${escHtml(k)}</option>`;
+      }).join('');
+      // カスタム入力欄
+      const customKamokuOpt = `<option value="__custom__">カスタム入力</option>`;
+      return `
+        <div class="dedup-card" data-key="${escAttr(choiceKey)}" data-idx="${idx}">
+          <div class="dedup-card-name">伝票 No.${escHtml(m.slip_no)} (${escHtml(m.date)}) ${escHtml(m.side)}</div>
+          <div style="margin:8px 0; font-size:14px; color:#555">
+            勘定科目: <strong>${escHtml(m.orig_kamoku)}</strong> / 金額: ${m.amount.toLocaleString()} / 摘要: ${escHtml(summaryShort)}
+          </div>
+          <div class="radio-options">
+            <label style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+              <input type="radio" name="${radioName}" value="auto-rebate" checked>
+              <span>自動振替 (借方移動+符号反転+課税売返${m.tax_rate === '8' ? '8%（軽）' : '10%'}):</span>
+              <select class="form-control kauuri-kamoku-select" id="kauuri_kamoku_${idx}"
+                style="display:inline-block; width:auto; max-width:220px"
+                onchange="kauuriKamokuSelectChange(${idx})">${kamokuOptions}${customKamokuOpt}</select>
+            </label>
+            <div id="kauuri_custom_kamoku_box_${idx}" style="display:none; margin-left:20px; margin-top:4px;">
+              <input type="text" class="form-control kauuri-custom-kamoku-input" id="kauuri_custom_kamoku_${idx}"
+                placeholder="例: 売上控除" style="font-family:monospace; max-width:240px;">
+            </div>
+            <label><input type="radio" name="${radioName}" value="keep"> 変更なし (現状維持)</label>
+          </div>
+        </div>`;
+    }).join('');
+
+    modal.style.display = 'flex';
+
+    window._kauuriResolve = (mode) => {
+      // mode: true (autoAll) | false (confirm) | 'cancel'
+      window._kauuriResolve = null;
+      if (mode === 'cancel') {
+        modal.style.display = 'none';
+        resolve(null);
+        return;
+      }
+      const autoAll = (mode === true);
+      const choices = {};
+      body.querySelectorAll('.dedup-card').forEach((card, cardIdx) => {
+        const choiceKey = card.dataset.key;
+        const idx       = card.dataset.idx;
+        let action, kamoku;
+        if (autoAll) {
+          action = 'auto-rebate';
+          kamoku = defaultKamoku || '売上値引高';
+        } else {
+          const checked = card.querySelector(`input[name="kauuri_${idx}"]:checked`);
+          action = checked ? checked.value : 'auto-rebate';
+          const kamokuSel = card.querySelector(`#kauuri_kamoku_${idx}`);
+          if (kamokuSel) {
+            const v = kamokuSel.value;
+            if (v === '__custom__') {
+              const customInput = card.querySelector(`#kauuri_custom_kamoku_${idx}`);
+              kamoku = (customInput && customInput.value.trim()) ? customInput.value.trim() : '売上値引高';
+            } else {
+              kamoku = v;
+            }
+          } else {
+            kamoku = defaultKamoku || '売上値引高';
+          }
+        }
+        const entry = { action };
+        if (action === 'auto-rebate') entry.kamoku = kamoku;
+        choices[choiceKey] = entry;
+      });
+      modal.style.display = 'none';
+      resolve(choices);
+    };
+  });
+}
+
+function kauuriKamokuSelectChange(idx) {
+  const sel = document.getElementById(`kauuri_kamoku_${idx}`);
+  const box = document.getElementById(`kauuri_custom_kamoku_box_${idx}`);
+  if (sel && box) box.style.display = (sel.value === '__custom__') ? '' : 'none';
+}
+
+function kauuriAutoAll() {
+  if (window._kauuriResolve) {
+    const r = window._kauuriResolve;
+    window._kauuriResolve = null;
+    r(true);
+  }
+}
+function kauuriConfirm() {
+  if (window._kauuriResolve) {
+    const r = window._kauuriResolve;
+    window._kauuriResolve = null;
+    r(false);
+  }
+}
+function kauuriCancel() {
+  if (window._kauuriResolve) {
+    const r = window._kauuriResolve;
+    window._kauuriResolve = null;
+    r('cancel');
+  }
+}
+
+// ===========================================================================
 // 結果レンダリング
 // ===========================================================================
 
@@ -1879,11 +2428,17 @@ function renderResult(r) {
     </div>
     ${auditHTML}
     ${dedupHTML}
+    <div id="kauuri-rebate-result-section-anchor"></div>
     <div id="nontax-result-section-anchor"></div>
     ${howtoHTML}`;
 
   // 初期タブのテーブルを描画
   renderPreviewTable(0, r.outputFiles[0].rows);
+
+  // 課売返対処結果セクション
+  if (r.kauuriRebateLog && r.kauuriRebateLog.length > 0) {
+    renderKauuriRebateResultsSection(r.kauuriRebateLog, r.outputFiles);
+  }
 
   // 非課税対処結果セクション
   if (r.nonTaxableResults && r.nonTaxableResults.length > 0) {
@@ -1896,20 +2451,27 @@ function renderAuditSections(r) {
   const audit = r.auditResult;
   const errors = r.errors;
   const balance = r.balanceResult;
+  const hasSlipDetails = !!(r.allGroups && r.allGroups.size > 0);
+
+  // 伝票No セル: クリックでモーダルを開く (allGroups があれば)
+  function slipNoCell(slipNo, date) {
+    if (!hasSlipDetails) return escHtml(slipNo);
+    return `<button class="slip-detail-btn" onclick="showSlipDetail(${JSON.stringify(slipNo)},${JSON.stringify(date)})">${escHtml(slipNo)}</button>`;
+  }
 
   // 1. 借貸不一致 (奉行原本)
   if (audit.mismatches.length > 0) {
-    const rows = audit.mismatches.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+    const rows = audit.mismatches.map(m => `<tr><td>${slipNoCell(m.slipNo, m.date)}</td><td>${escHtml(m.date)}</td>
       <td>${m.dr.toLocaleString()}</td><td>${m.cr.toLocaleString()}</td><td>${(m.dr-m.cr).toLocaleString()}</td></tr>`).join('');
-    sections.push({title:'[要確認 1/3] 奉行原本の借貸不一致伝票', count: audit.mismatches.length, type:'warn',
+    sections.push({title:'[要確認] 奉行原本の借貸不一致伝票', count: audit.mismatches.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
   // 2. 課売上マイナス
   if (audit.minusKaubai.length > 0) {
-    const rows = audit.minusKaubai.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+    const rows = audit.minusKaubai.map(m => `<tr><td>${slipNoCell(m.slipNo, m.date)}</td><td>${escHtml(m.date)}</td>
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
-    sections.push({title:'[要確認 2/3] 課売上+マイナス (課売返への振替検討)', count: audit.minusKaubai.length, type:'warn',
+    sections.push({title:'[要確認] 課売上+マイナス (課売返への振替検討)', count: audit.minusKaubai.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>金額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
@@ -1917,7 +2479,7 @@ function renderAuditSections(r) {
   if (audit.nonTaxableSales && audit.nonTaxableSales.length > 0) {
     const rows = audit.nonTaxableSales.map(m => `<tr><td>${escHtml(m.slip_no)}</td><td>${escHtml(m.date)}</td>
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
-    sections.push({title:'[要確認 3/3] 非課売上+税額あり (freeeエラー対象)', count: audit.nonTaxableSales.length, type:'warn',
+    sections.push({title:'[要確認] 非課売上+税額あり (freeeエラー対象)', count: audit.nonTaxableSales.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
@@ -1987,6 +2549,78 @@ function toggleAudit(header) {
   const body = section.querySelector('.audit-body');
   section.classList.toggle('expanded');
   body.classList.toggle('open');
+}
+
+// ===========================================================================
+// 課売返対処結果セクション (Step3)
+// ===========================================================================
+
+function renderKauuriRebateResultsSection(results, outputFiles) {
+  const existing = document.getElementById('kauuri-rebate-result-section');
+  if (existing) existing.remove();
+  if (!results || results.length === 0) return;
+
+  const anchor = document.getElementById('kauuri-rebate-result-section-anchor');
+  const section = document.createElement('div');
+  section.id = 'kauuri-rebate-result-section';
+  section.className = 'card';
+  section.style.marginBottom = '8px';
+
+  const headerDiv = document.createElement('div');
+  headerDiv.className = 'audit-header audit-section expanded';
+  headerDiv.style.cssText = 'cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--gray-50);';
+  const converted = results.filter(e => e.action === 'auto-rebate').length;
+  const kept = results.filter(e => e.action === 'keep').length;
+  headerDiv.innerHTML = `
+    <span class="audit-title" style="font-size:13px;font-weight:600;flex:1;">課売返振替変換結果</span>
+    <span class="audit-badge" style="background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">${results.length} 件 (変換: ${converted} / 維持: ${kept})</span>
+    <span class="audit-chevron" style="font-size:12px;color:var(--gray-500);transition:transform 0.2s;transform:rotate(180deg);">▲</span>`;
+
+  const bodyDiv = document.createElement('div');
+  bodyDiv.className = 'audit-body open';
+  bodyDiv.style.cssText = 'padding:12px 14px;border-top:1px solid var(--gray-200);';
+
+  const table = document.createElement('table');
+  table.className = 'audit-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>伝票No</th><th>日付</th><th>元側</th>
+      <th>元科目</th><th>元金額</th><th>税率</th>
+      <th>処理</th><th>変換先科目</th><th>適用後税区分</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+    const actionLabel = row.action === 'auto-rebate' ? '振替変換' : 'そのまま(警告のみ)';
+    tr.innerHTML = `
+      <td>${escHtml(row.slip_no || '')}</td>
+      <td>${escHtml(row.date || '')}</td>
+      <td>${escHtml(row.side || '')}</td>
+      <td>${escHtml(row.orig_kamoku || '')}</td>
+      <td style="text-align:right">${(row.orig_amount||0).toLocaleString()}</td>
+      <td>${escHtml(row.tax_rate ? row.tax_rate + '%' : '')}</td>
+      <td style="color:${row.action==='auto-rebate'?'var(--blue)':'var(--gray-500)'}">${escHtml(actionLabel)}</td>
+      <td>${escHtml(row.result_kamoku || '')}</td>
+      <td><strong>${escHtml(row.result_tax_code || '')}</strong></td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  bodyDiv.appendChild(table);
+
+  const chevron = headerDiv.querySelector('.audit-chevron');
+  headerDiv.addEventListener('click', () => {
+    const open = bodyDiv.classList.toggle('open');
+    chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+  });
+
+  section.appendChild(headerDiv);
+  section.appendChild(bodyDiv);
+
+  if (anchor) {
+    anchor.parentNode.insertBefore(section, anchor);
+  } else {
+    document.getElementById('result-content').appendChild(section);
+  }
 }
 
 // ===========================================================================
@@ -2317,6 +2951,8 @@ function saveSettings() {
       dedupStrategy: document.getElementById('opt-dedup-strategy').value,
       nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'warn-only'}).value,
       knownMismatches: document.getElementById('opt-known-mismatches').value,
+      kauuriRebateStrategy: (document.getElementById('opt-kauuri-rebate-strategy') || {value: 'warn-only'}).value,
+      kauuriRebateKamoku: (document.getElementById('opt-kauuri-rebate-kamoku') || {value: '売上値引高'}).value,
     }));
   } catch(e) {}
 }
@@ -2339,6 +2975,14 @@ function loadSettings() {
       if (el) el.value = s.nonTaxableStrategy;
     }
     if (s.knownMismatches != null) document.getElementById('opt-known-mismatches').value = s.knownMismatches;
+    if (s.kauuriRebateStrategy) {
+      const el = document.getElementById('opt-kauuri-rebate-strategy');
+      if (el) { el.value = s.kauuriRebateStrategy; toggleKauuriRebateOptions(); }
+    }
+    if (s.kauuriRebateKamoku) {
+      const el = document.getElementById('opt-kauuri-rebate-kamoku');
+      if (el) { el.value = s.kauuriRebateKamoku; toggleKauuriCustomKamoku(); }
+    }
   } catch(e) {}
 }
 

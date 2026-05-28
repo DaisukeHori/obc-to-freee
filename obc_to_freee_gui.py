@@ -117,7 +117,7 @@ def extract_audit_sections(stderr: str) -> dict:
     audit_obc_source() の stderr 出力を抽出して dict で返す。
 
     責務と設計上の注意:
-      - [要確認 1/3] / [要確認 2/3] / [要確認 3/3] / [業務確認用] は
+      - [要確認] 借貸不一致 / [要確認] 課売上マイナス / [要確認] 非課売上 / [業務確認用] は
         audit_obc_source() が出力するセクションで、この関数が主担当として抽出する。
       - [要確認 取引先マスタ A] / [要確認 取引先マスタ B] は
         print_partner_warnings() が出力するセクションであり、別関数が責任を持つ。
@@ -146,9 +146,9 @@ def extract_audit_sections(stderr: str) -> dict:
     }
 
     section_map = {
-        "[要確認 1/3]": "balanceWarnings",
-        "[要確認 2/3]": "negativeWarnings",
-        "[要確認 3/3]": "nonTaxableSalesWarnings",
+        "[要確認] 奉行原本由来": "balanceWarnings",
+        "[要確認] 課売上区分": "negativeWarnings",
+        "[要確認] 非課売上区分": "nonTaxableSalesWarnings",
         "[業務確認用]": "businessReview",
         "[要確認 取引先マスタ A]": "auditA",
         "[要確認 取引先マスタ B]": "auditB",
@@ -211,6 +211,40 @@ def extract_non_taxable_results(stderr: str) -> list:
                 print(f"[GUI] NONTAX_RESULTS_JSON パース失敗: {e}")
                 return []
     return []
+
+
+def extract_kauuri_rebate_results(stderr: str) -> list:
+    """
+    stderr から KAUURI_REBATE_JSON: 行を抽出して list で返す。
+    フォーマット: KAUURI_REBATE_JSON:[{...}, ...]
+    """
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("KAUURI_REBATE_JSON:"):
+            json_part = stripped[len("KAUURI_REBATE_JSON:"):]
+            try:
+                return json.loads(json_part)
+            except Exception as e:
+                print(f"[GUI] KAUURI_REBATE_JSON パース失敗: {e}")
+                return []
+    return []
+
+
+def extract_slip_details(stderr: str) -> dict:
+    """
+    stderr から SLIP_DETAILS_JSON: 行を抽出して dict で返す。
+    フォーマット: SLIP_DETAILS_JSON:{"伝票No": [{...}, ...], ...}
+    """
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SLIP_DETAILS_JSON:"):
+            json_part = stripped[len("SLIP_DETAILS_JSON:"):]
+            try:
+                return json.loads(json_part)
+            except Exception as e:
+                print(f"[GUI] SLIP_DETAILS_JSON パース失敗: {e}")
+                return {}
+    return {}
 
 
 def extract_dedup_audit(stderr: str) -> list:
@@ -583,10 +617,12 @@ class Handler(BaseHTTPRequestHandler):
             encoding = fields.get("encoding", "auto").strip() or "auto"
             dedup_strategy = fields.get("dedupStrategy", "warn-only").strip() or "warn-only"
             non_taxable_strategy = fields.get("nonTaxableStrategy", "warn-only").strip() or "warn-only"
+            kauuri_rebate_strategy = fields.get("kauuriRebateStrategy", "warn-only").strip() or "warn-only"
+            kauuri_rebate_kamoku = fields.get("kauuriRebateKamoku", "売上値引高").strip() or "売上値引高"
 
             input_file_data = files  # [{ "filename": str, "data": bytes }]
 
-            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}, non_taxable={non_taxable_strategy}")
+            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}, non_taxable={non_taxable_strategy}, kauuri={kauuri_rebate_strategy}")
 
             if not input_file_data:
                 self._send_json({"success": False, "error": "入力ファイルが指定されていません"})
@@ -648,6 +684,18 @@ class Handler(BaseHTTPRequestHandler):
             if non_taxable_strategy in valid_nt_strategies and non_taxable_strategy != "warn-only":
                 cmd += ["--non-taxable-mismatch-strategy", non_taxable_strategy]
 
+            # 課売返振替戦略 (auto-rebate のみ通常フローで受け付け、custom は 400 で弾く)
+            if kauuri_rebate_strategy == "custom":
+                self._send_json(
+                    {"success": False, "error": "custom 戦略は /api/upload-and-detect + /api/convert-with-choices フローでのみ使用してください"},
+                    status=400,
+                )
+                return
+            valid_kr_strategies = {"warn-only", "auto-rebate"}
+            if kauuri_rebate_strategy in valid_kr_strategies and kauuri_rebate_strategy != "warn-only":
+                cmd += ["--kauuri-rebate-strategy", kauuri_rebate_strategy]
+                cmd += ["--kauuri-rebate-kamoku", kauuri_rebate_kamoku]
+
             print(f"[GUI] 実行: {' '.join(cmd)}")
 
             result = subprocess.run(
@@ -668,33 +716,48 @@ class Handler(BaseHTTPRequestHandler):
             # 非課税対処結果抽出
             non_taxable_results = extract_non_taxable_results(result.stderr)
 
+            # 課売返振替結果抽出
+            kauuri_rebate_results = extract_kauuri_rebate_results(result.stderr)
+
+            # 元伝票詳細抽出
+            slip_details = extract_slip_details(result.stderr)
+
             # 出力ファイル収集
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
             # サマリ
             summary = build_summary(outputs, audit)
 
+            # Suggestion-6: SLIP_DETAILS_JSON 行を history に含めない (slipDetails は別キー保存済)
+            stderr_for_history = "\n".join(
+                line for line in result.stderr.splitlines()
+                if not line.startswith("SLIP_DETAILS_JSON:")
+            )
             response = {
                 "success": result.returncode == 0,
                 "timestamp": timestamp,
                 "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stderr": stderr_for_history,
                 "exitCode": result.returncode,
                 "outputs": outputs,
                 "summary": summary,
                 "dedupAudit": dedup_audit,
                 "nonTaxableResults": non_taxable_results,
+                "kauuriRebateResults": kauuri_rebate_results,
+                "slipDetails": slip_details,
             }
 
             # 失敗時でも詳細情報を付与
             if result.returncode != 0:
                 response["error"] = result.stderr.strip() or "変換処理でエラーが発生しました"
 
-            # ヒストリ保存
+            # ヒストリ保存 (stderr は SLIP_DETAILS_JSON 除去済のものを保存)
+            hist_entry = dict(response)
+            hist_entry["stderr"] = stderr_for_history
             hist_file = HISTORY_DIR / f"{timestamp}.json"
             try:
                 with open(hist_file, "w", encoding="utf-8") as f:
-                    json.dump(response, f, ensure_ascii=False, indent=2)
+                    json.dump(hist_entry, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[GUI] ヒストリ保存失敗: {e}")
 
@@ -758,6 +821,10 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(file_info.get("data", b""))
                 input_paths.append(str(save_path))
 
+            # kauuri_rebate オプション取得
+            kauuri_rebate_strategy_meta = fields.get("kauuriRebateStrategy", "warn-only").strip() or "warn-only"
+            kauuri_rebate_kamoku_meta = fields.get("kauuriRebateKamoku", "売上値引高").strip() or "売上値引高"
+
             # オプションを token メタデータとして保存
             meta = {
                 "timestamp": timestamp,
@@ -769,6 +836,8 @@ class Handler(BaseHTTPRequestHandler):
                 "rowsPerFile": rows_per_file,
                 "outputPartners": output_partners,
                 "partnersPrefix": partners_prefix,
+                "kauuriRebateStrategy": kauuri_rebate_strategy_meta,
+                "kauuriRebateKamoku": kauuri_rebate_kamoku_meta,
             }
             meta_path = upload_dir / "_meta.json"
             with open(meta_path, "w", encoding="utf-8") as f:
@@ -849,13 +918,48 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"[GUI] detect non-taxable JSON パース失敗: {e}")
 
+            # --detect-kauuri-only で課売上+マイナス起票を検出
+            kauuri_mismatches = []
+            if kauuri_rebate_strategy_meta == "custom":
+                cmd_kauuri = [
+                    sys.executable,
+                    str(SCRIPT_DIR / "obc_to_freee.py"),
+                    "--input", *input_paths,
+                    "--output-dir", str(upload_dir),
+                    "--output-prefix", "detect_tmp_kauuri",
+                    "--encoding", encoding,
+                    "--detect-kauuri-only",
+                ]
+                if date_from:
+                    cmd_kauuri += ["--from", date_from]
+                if date_to:
+                    cmd_kauuri += ["--to", date_to]
+                result_kauuri = subprocess.run(
+                    cmd_kauuri,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(SCRIPT_DIR),
+                )
+                if result_kauuri.returncode == 0 and result_kauuri.stdout.strip():
+                    try:
+                        stdout_text = result_kauuri.stdout.strip()
+                        json_start = stdout_text.find("{")
+                        if json_start >= 0:
+                            kauuri_result = json.loads(stdout_text[json_start:])
+                            kauuri_mismatches = kauuri_result.get("kauuriMismatches", [])
+                    except Exception as e:
+                        print(f"[GUI] detect kauuri JSON パース失敗: {e}")
+
             self._send_json({
                 "success": True,
                 "uploadToken": timestamp,
                 "duplicates": duplicates,
                 "nonTaxableMismatches": non_taxable_mismatches,
+                "kauuriMismatches": kauuri_mismatches,
             })
-            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 (非売上のみ) {len(non_taxable_mismatches)} 件")
+            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 (非売上のみ) {len(non_taxable_mismatches)} 件 / 課売返候補 {len(kauuri_mismatches)} 件")
 
         except Exception as e:
             import traceback
@@ -886,6 +990,7 @@ class Handler(BaseHTTPRequestHandler):
             upload_token = req.get("uploadToken", "").strip()
             dedup_choices = req.get("dedupChoices", {})
             non_taxable_choices = req.get("nonTaxableChoices", {})
+            kauuri_choices = req.get("kauuriChoices", {})
 
             if not upload_token:
                 self._send_json({"success": False, "error": "uploadToken が必要です"})
@@ -919,6 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
             rows_per_file = meta.get("rowsPerFile", 10000)
             output_partners = meta.get("outputPartners", False)
             partners_prefix = meta.get("partnersPrefix", "freee取引先マスタ")
+            kauuri_rebate_strategy_from_meta = meta.get("kauuriRebateStrategy", "warn-only")
+            kauuri_rebate_kamoku_from_meta = meta.get("kauuriRebateKamoku", "売上値引高")
 
             # 出力先
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -934,6 +1041,11 @@ class Handler(BaseHTTPRequestHandler):
             nt_custom_json_path = upload_dir / "_non_taxable_choices.json"
             with open(nt_custom_json_path, "w", encoding="utf-8") as f:
                 json.dump(non_taxable_choices, f, ensure_ascii=False, indent=2)
+
+            # 課売返 custom JSON を一時ファイルに書き出し
+            kauuri_custom_json_path = upload_dir / "_kauuri_choices.json"
+            with open(kauuri_custom_json_path, "w", encoding="utf-8") as f:
+                json.dump(kauuri_choices, f, ensure_ascii=False, indent=2)
 
             # subprocess コマンド構築
             cmd = [
@@ -960,7 +1072,18 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--non-taxable-mismatch-strategy", "custom"]
                 cmd += ["--non-taxable-mismatch-custom-json", str(nt_custom_json_path)]
 
-            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, dedup={len(dedup_choices)}, non_taxable={len(non_taxable_choices)}")
+            # 課売返振替戦略 (meta から)
+            valid_kr = {"warn-only", "auto-rebate", "custom"}
+            if kauuri_rebate_strategy_from_meta in valid_kr and kauuri_rebate_strategy_from_meta != "warn-only":
+                if kauuri_rebate_strategy_from_meta == "custom" and kauuri_choices:
+                    cmd += ["--kauuri-rebate-strategy", "custom"]
+                    cmd += ["--kauuri-rebate-kamoku", kauuri_rebate_kamoku_from_meta]
+                    cmd += ["--kauuri-rebate-custom-json", str(kauuri_custom_json_path)]
+                elif kauuri_rebate_strategy_from_meta == "auto-rebate":
+                    cmd += ["--kauuri-rebate-strategy", kauuri_rebate_strategy_from_meta]
+                    cmd += ["--kauuri-rebate-kamoku", kauuri_rebate_kamoku_from_meta]
+
+            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, dedup={len(dedup_choices)}, non_taxable={len(non_taxable_choices)}, kauuri={kauuri_rebate_strategy_from_meta} kauuri_choices={len(kauuri_choices)}")
             print(f"[GUI] 実行: {' '.join(cmd)}")
 
             result = subprocess.run(
@@ -981,32 +1104,47 @@ class Handler(BaseHTTPRequestHandler):
             # 非課税対処結果抽出
             non_taxable_results = extract_non_taxable_results(result.stderr)
 
+            # 課売返振替結果抽出
+            kauuri_rebate_results = extract_kauuri_rebate_results(result.stderr)
+
+            # 元伝票詳細抽出
+            slip_details = extract_slip_details(result.stderr)
+
             # 出力ファイル収集
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
             # サマリ
             summary = build_summary(outputs, audit)
 
+            # Suggestion-6: SLIP_DETAILS_JSON 行を history に含めない (slipDetails は別キー保存済)
+            stderr_for_history = "\n".join(
+                line for line in result.stderr.splitlines()
+                if not line.startswith("SLIP_DETAILS_JSON:")
+            )
             response = {
                 "success": result.returncode == 0,
                 "timestamp": timestamp,
                 "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stderr": stderr_for_history,
                 "exitCode": result.returncode,
                 "outputs": outputs,
                 "summary": summary,
                 "dedupAudit": dedup_audit,
                 "nonTaxableResults": non_taxable_results,
+                "kauuriRebateResults": kauuri_rebate_results,
+                "slipDetails": slip_details,
             }
 
             if result.returncode != 0:
                 response["error"] = result.stderr.strip() or "変換処理でエラーが発生しました"
 
-            # ヒストリ保存
+            # ヒストリ保存 (stderr は SLIP_DETAILS_JSON 除去済のものを保存)
+            hist_entry = dict(response)
+            hist_entry["stderr"] = stderr_for_history
             hist_file = HISTORY_DIR / f"{timestamp}.json"
             try:
                 with open(hist_file, "w", encoding="utf-8") as f:
-                    json.dump(response, f, ensure_ascii=False, indent=2)
+                    json.dump(hist_entry, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"[GUI] ヒストリ保存失敗: {e}")
 
