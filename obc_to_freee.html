@@ -470,6 +470,13 @@
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title">同名異コード — 対処を選択してください</div>
+      <div style="display:flex;gap:6px;margin-left:auto;">
+        <button class="btn btn-success btn-sm" onclick="dedupModalDownloadCsv()" title="候補一覧をCSVダウンロード">📥 CSV</button>
+        <button class="btn btn-secondary btn-sm" onclick="dedupModalToggleCopy()" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+    </div>
+    <div id="dedup-modal-copy-area" style="display:none;padding:0 20px 8px;">
+      <textarea id="dedup-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
     </div>
     <div class="modal-body" id="dedup-modal-body"></div>
     <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
@@ -487,6 +494,13 @@
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title">非課税+税額矛盾 — 対処を選択してください</div>
+      <div style="display:flex;gap:6px;margin-left:auto;">
+        <button class="btn btn-success btn-sm" onclick="nontaxModalDownloadCsv()" title="矛盾一覧をCSVダウンロード">📥 CSV</button>
+        <button class="btn btn-secondary btn-sm" onclick="nontaxModalToggleCopy()" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+    </div>
+    <div id="nontax-modal-copy-area" style="display:none;padding:0 20px 8px;">
+      <textarea id="nontax-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
     </div>
     <div class="modal-body" id="nontax-modal-body"></div>
     <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
@@ -504,6 +518,13 @@
   <div class="modal">
     <div class="modal-header">
       <div class="modal-title">課売上+マイナス起票の振替判断</div>
+      <div style="display:flex;gap:6px;margin-left:auto;">
+        <button class="btn btn-success btn-sm" onclick="kauuriModalDownloadCsv()" title="課売上マイナス一覧をCSVダウンロード">📥 CSV</button>
+        <button class="btn btn-secondary btn-sm" onclick="kauuriModalToggleCopy()" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+    </div>
+    <div id="kauuri-modal-copy-area" style="display:none;padding:0 20px 8px;">
+      <textarea id="kauuri-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
     </div>
     <div class="modal-body" id="kauuri-modal-body">
       <p style="font-size:14px;color:#555;margin-bottom:12px;">以下の課売上マイナス起票について、どう振替するか選択してください。</p>
@@ -1897,11 +1918,201 @@ function applyKauuriRebate(allGroups, opts) {
 // dedup 対話モーダル
 // ===========================================================================
 
+// モーダル用データキャッシュ
+let _dedupModalData = null;   // { sameNameGroups, allGroups }
+let _nontaxModalData = null;  // mismatches array
+let _kauuriModalData = null;  // candidates array
+let _dedupModalCopyVisible = false;
+let _nontaxModalCopyVisible = false;
+let _kauuriModalCopyVisible = false;
+
+// ===========================================================================
+// dedup モーダル CSV/コピー (モーダル内)
+// ===========================================================================
+
+function buildDedupModalCsv(sameNameGroups, allGroups) {
+  const headers = ['取引先名', 'コード', '借方使用', '貸方使用', '合計', '自動推奨統合先'];
+  const lines = [headers.join(',')];
+  const groupArr = [...sameNameGroups.entries()].sort();
+  groupArr.forEach(([name, codes]) => {
+    const usages = codes.map(code => {
+      const u = countUsage(code, allGroups);
+      return { code, ...u };
+    });
+    const maxTotal = Math.max(...usages.map(u => u.total));
+    const recommended = usages.filter(u => u.total === maxTotal).map(u => u.code).sort()[0];
+    usages.forEach(u => {
+      const cells = [name, u.code, String(u.dr), String(u.cr), String(u.total), u.code === recommended ? u.code : ''].map(v => `"${String(v).replace(/"/g, '""')}"`);
+      lines.push(cells.join(','));
+    });
+  });
+  return lines.join('\r\n');
+}
+
+function buildDedupModalTabText(sameNameGroups, allGroups) {
+  const headers = ['取引先名', 'コード', '借方使用', '貸方使用', '合計', '自動推奨統合先'];
+  const lines = [headers.join('\t')];
+  const groupArr = [...sameNameGroups.entries()].sort();
+  groupArr.forEach(([name, codes]) => {
+    const usages = codes.map(code => {
+      const u = countUsage(code, allGroups);
+      return { code, ...u };
+    });
+    const maxTotal = Math.max(...usages.map(u => u.total));
+    const recommended = usages.filter(u => u.total === maxTotal).map(u => u.code).sort()[0];
+    usages.forEach(u => {
+      lines.push([name, u.code, String(u.dr), String(u.cr), String(u.total), u.code === recommended ? u.code : ''].join('\t'));
+    });
+  });
+  return lines.join('\n');
+}
+
+function dedupModalDownloadCsv() {
+  if (!_dedupModalData) return;
+  const { sameNameGroups, allGroups } = _dedupModalData;
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const fname = `同名異コード一覧_${today}.csv`;
+  const csv = buildDedupModalCsv(sameNameGroups, allGroups);
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  downloadBlob(blob, fname);
+}
+
+function dedupModalToggleCopy() {
+  if (!_dedupModalData) return;
+  _dedupModalCopyVisible = !_dedupModalCopyVisible;
+  const area = document.getElementById('dedup-modal-copy-area');
+  const ta   = document.getElementById('dedup-modal-copy-ta');
+  if (area) area.style.display = _dedupModalCopyVisible ? '' : 'none';
+  if (_dedupModalCopyVisible && ta) {
+    if (!ta.value) ta.value = buildDedupModalTabText(_dedupModalData.sameNameGroups, _dedupModalData.allGroups);
+    ta.select();
+  }
+}
+
+// ===========================================================================
+// nontax モーダル CSV/コピー (モーダル内)
+// ===========================================================================
+
+function buildNontaxModalCsv(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join(',')];
+  (mismatches || []).forEach(m => {
+    const cells = [
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '', '',
+      String(m.amount || ''), String(m.tax_amount || ''),
+      m.tax_label || '', m.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildNontaxModalTabText(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join('\t')];
+  (mismatches || []).forEach(m => {
+    lines.push([
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '', '',
+      String(m.amount || ''), String(m.tax_amount || ''),
+      m.tax_label || '', m.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
+function nontaxModalDownloadCsv() {
+  if (!_nontaxModalData) return;
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const fname = `非課税税額矛盾一覧_${today}.csv`;
+  const csv = buildNontaxModalCsv(_nontaxModalData);
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  downloadBlob(blob, fname);
+}
+
+function nontaxModalToggleCopy() {
+  if (!_nontaxModalData) return;
+  _nontaxModalCopyVisible = !_nontaxModalCopyVisible;
+  const area = document.getElementById('nontax-modal-copy-area');
+  const ta   = document.getElementById('nontax-modal-copy-ta');
+  if (area) area.style.display = _nontaxModalCopyVisible ? '' : 'none';
+  if (_nontaxModalCopyVisible && ta) {
+    if (!ta.value) ta.value = buildNontaxModalTabText(_nontaxModalData);
+    ta.select();
+  }
+}
+
+// ===========================================================================
+// kauuri モーダル CSV/コピー (モーダル内)
+// ===========================================================================
+
+function buildKauuriModalCsv(candidates) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join(',')];
+  (candidates || []).forEach(m => {
+    // tax_rate から元税区分略称を逆算
+    const taxLabel = m.tax_rate === '8' ? '課売上(8%軽)' : '課売上(10%)';
+    const cells = [
+      m.slip_no || '', m.date || '', m.side || '',
+      m.orig_kamoku || '',
+      String(m.amount || ''), '',
+      taxLabel, m.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildKauuriModalTabText(candidates) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join('\t')];
+  (candidates || []).forEach(m => {
+    const taxLabel = m.tax_rate === '8' ? '課売上(8%軽)' : '課売上(10%)';
+    lines.push([
+      m.slip_no || '', m.date || '', m.side || '',
+      m.orig_kamoku || '',
+      String(m.amount || ''), '',
+      taxLabel, m.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
+function kauuriModalDownloadCsv() {
+  if (!_kauuriModalData) return;
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const fname = `課売上マイナス起票一覧_${today}.csv`;
+  const csv = buildKauuriModalCsv(_kauuriModalData);
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  downloadBlob(blob, fname);
+}
+
+function kauuriModalToggleCopy() {
+  if (!_kauuriModalData) return;
+  _kauuriModalCopyVisible = !_kauuriModalCopyVisible;
+  const area = document.getElementById('kauuri-modal-copy-area');
+  const ta   = document.getElementById('kauuri-modal-copy-ta');
+  if (area) area.style.display = _kauuriModalCopyVisible ? '' : 'none';
+  if (_kauuriModalCopyVisible && ta) {
+    if (!ta.value) ta.value = buildKauuriModalTabText(_kauuriModalData);
+    ta.select();
+  }
+}
+
 function showDedupModal(sameNameGroups, allGroups) {
   return new Promise((resolve) => {
     const choices = {};
     const modal = document.getElementById('dedup-modal');
     const body = document.getElementById('dedup-modal-body');
+
+    // キャッシュ保存 + コピーエリアリセット
+    _dedupModalData = { sameNameGroups, allGroups };
+    _dedupModalCopyVisible = false;
+    const copyArea = document.getElementById('dedup-modal-copy-area');
+    const copyTa   = document.getElementById('dedup-modal-copy-ta');
+    if (copyArea) copyArea.style.display = 'none';
+    if (copyTa) copyTa.value = '';
 
     const groupArr = [...sameNameGroups.entries()].sort();
     body.innerHTML = groupArr.map(([name, codes]) => {
@@ -2064,6 +2275,14 @@ function showNonTaxableModal(mismatches) {
     const modal = document.getElementById('nontax-modal');
     const body = document.getElementById('nontax-modal-body');
 
+    // キャッシュ保存 + コピーエリアリセット
+    _nontaxModalData = mismatches;
+    _nontaxModalCopyVisible = false;
+    const copyArea = document.getElementById('nontax-modal-copy-area');
+    const copyTa   = document.getElementById('nontax-modal-copy-ta');
+    if (copyArea) copyArea.style.display = 'none';
+    if (copyTa) copyTa.value = '';
+
     body.innerHTML = mismatches.map((m, idx) => {
       // 非仕入は今回の修正で非対仕入10%に自動変換されるためここには来ない → 常に TAX_CODES_SALES
       const candidates = TAX_CODES_SALES;
@@ -2204,6 +2423,14 @@ function showKauuriModal(candidates, defaultKamoku) {
   return new Promise((resolve) => {
     const modal = document.getElementById('kauuri-modal');
     const body  = document.getElementById('kauuri-modal-body');
+
+    // キャッシュ保存 + コピーエリアリセット
+    _kauuriModalData = candidates;
+    _kauuriModalCopyVisible = false;
+    const copyArea = document.getElementById('kauuri-modal-copy-area');
+    const copyTa   = document.getElementById('kauuri-modal-copy-ta');
+    if (copyArea) copyArea.style.display = 'none';
+    if (copyTa) copyTa.value = '';
 
     body.innerHTML = '<p style="font-size:14px;color:#555;margin-bottom:12px;">以下の課売上マイナス起票について、どう振替するか選択してください。</p>'
       + candidates.map((m, idx) => {
@@ -2441,7 +2668,7 @@ function renderAuditSections(r) {
   const audit = r.auditResult;
   const errors = r.errors;
   const balance = r.balanceResult;
-  const hasSlipDetails = !!(r.allGroups && r.allGroups.size > 0);
+  const hasSlipDetails = !!(r.originalGroups && r.originalGroups.size > 0);
 
   // 伝票No セル: クリックでモーダルを開く (allGroups があれば)
   function slipNoCell(slipNo, date) {
@@ -2467,7 +2694,7 @@ function renderAuditSections(r) {
 
   // 3. 非課売上+税額あり (freeeエラー対象)
   if (audit.nonTaxableSales && audit.nonTaxableSales.length > 0) {
-    const rows = audit.nonTaxableSales.map(m => `<tr><td>${escHtml(m.slip_no)}</td><td>${escHtml(m.date)}</td>
+    const rows = audit.nonTaxableSales.map(m => `<tr><td>${slipNoCell(m.slip_no, m.date)}</td><td>${escHtml(m.date)}</td>
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
     sections.push({title:'[要確認] 非課売上+税額あり (freeeエラー対象)', count: audit.nonTaxableSales.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
@@ -2475,7 +2702,7 @@ function renderAuditSections(r) {
 
   // 業務確認用: 非仕入+税額あり (freeeエラーなし・参考情報)
   if (audit.businessReview && audit.businessReview.length > 0) {
-    const rows = audit.businessReview.map(m => `<tr><td>${escHtml(m.slip_no)}</td><td>${escHtml(m.date)}</td>
+    const rows = audit.businessReview.map(m => `<tr><td>${slipNoCell(m.slip_no, m.date)}</td><td>${escHtml(m.date)}</td>
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
     sections.push({title:'[参考情報 ※件数外] 非仕入+税額あり (freeeエラーなし・対処任意)', count: audit.businessReview.length, type:'info', isRef: true,
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
@@ -2511,7 +2738,7 @@ function renderAuditSections(r) {
 
   // 出力CSV借貸不一致 (未知)
   if (balance.unknown.length > 0) {
-    const rows = balance.unknown.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
+    const rows = balance.unknown.map(m => `<tr><td>${slipNoCell(m.slipNo, m.date)}</td><td>${escHtml(m.date)}</td>
       <td>${m.dr.toLocaleString()}</td><td>${m.cr.toLocaleString()}</td><td>${(m.dr-m.cr).toLocaleString()}</td></tr>`).join('');
     sections.push({title:'出力CSV 借貸不一致 (変換バグ疑い)', count: balance.unknown.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方</th><th>貸方</th><th>差</th></tr></thead><tbody>${rows}</tbody></table>`});

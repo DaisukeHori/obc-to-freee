@@ -351,7 +351,14 @@
   <!-- Dedup choices modal (custom 戦略) -->
   <div id="dedup-modal" class="modal-overlay" style="display:none">
     <div class="modal-box modal-box-lg">
-      <h3>同名異コードの対処を選択</h3>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <h3 style="flex:1;margin:0;">同名異コードの対処を選択</h3>
+        <button type="button" id="btn-dedup-dl-csv" class="btn btn-success btn-sm-inner" title="候補一覧をCSVダウンロード">📥 CSV</button>
+        <button type="button" id="btn-dedup-copy" class="btn btn-ghost btn-sm-inner" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+      <div id="dedup-modal-copy-area" style="display:none;margin-bottom:8px;">
+        <textarea id="dedup-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
+      </div>
       <p id="dedup-modal-desc">同一名称に複数の取引先コードが見つかりました。各取引先の対処方法を選んでください。</p>
 
       <div class="dedup-modal-toolbar">
@@ -380,7 +387,14 @@
   <!-- Non-taxable mismatch modal (custom 戦略) -->
   <div id="nontax-modal" class="modal-overlay" style="display:none">
     <div class="modal-box modal-box-lg">
-      <h3>非課税+税額矛盾の対処を選択</h3>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <h3 style="flex:1;margin:0;">非課税+税額矛盾の対処を選択</h3>
+        <button type="button" id="btn-nontax-dl-csv" class="btn btn-success btn-sm-inner" title="矛盾一覧をCSVダウンロード">📥 CSV</button>
+        <button type="button" id="btn-nontax-copy" class="btn btn-ghost btn-sm-inner" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+      <div id="nontax-modal-copy-area" style="display:none;margin-bottom:8px;">
+        <textarea id="nontax-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
+      </div>
       <p id="nontax-modal-desc">税区分が「非売上」(非課税売上) なのに税額が入っている行が見つかりました。freee は「非課売上では税額を入力できません」エラーを返すため、各行の対処を選んでください。</p>
 
       <div class="dedup-modal-toolbar">
@@ -409,7 +423,14 @@
   <!-- 課売返振替 custom 対話モーダル -->
   <div id="kauuri-modal" class="modal-overlay" style="display:none">
     <div class="modal-box modal-box-lg">
-      <h3>課売上+マイナス起票の振替判断</h3>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <h3 style="flex:1;margin:0;">課売上+マイナス起票の振替判断</h3>
+        <button type="button" id="btn-kauuri-dl-csv" class="btn btn-success btn-sm-inner" title="課売上マイナス一覧をCSVダウンロード">📥 CSV</button>
+        <button type="button" id="btn-kauuri-copy" class="btn btn-ghost btn-sm-inner" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+      <div id="kauuri-modal-copy-area" style="display:none;margin-bottom:8px;">
+        <textarea id="kauuri-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
+      </div>
       <p id="kauuri-modal-desc">以下の課売上マイナス起票について、どう振替するか選択してください。</p>
 
       <div class="dedup-modal-toolbar">

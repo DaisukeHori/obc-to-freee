@@ -22,6 +22,14 @@ const state = {
 // 'http://localhost:8765' のようなハードコードを避ける
 const BASE = '';
 
+// モーダル用データキャッシュ
+let _guiDedupModalData = null;   // { duplicates }
+let _guiNontaxModalData = null;  // mismatches array
+let _guiKauuriModalData = null;  // mismatches array
+let _guiDedupCopyVisible = false;
+let _guiNontaxCopyVisible = false;
+let _guiKauuriCopyVisible = false;
+
 // ============================================================
 // Toast helper
 // ============================================================
@@ -579,6 +587,14 @@ function openDedupModal(duplicates, options) {
     container.appendChild(card);
   });
 
+  // キャッシュ保存 + コピーエリアリセット
+  _guiDedupModalData = { duplicates };
+  _guiDedupCopyVisible = false;
+  const copyArea = document.getElementById('dedup-modal-copy-area');
+  const copyTa   = document.getElementById('dedup-modal-copy-ta');
+  if (copyArea) copyArea.style.display = 'none';
+  if (copyTa) copyTa.value = '';
+
   // 確定時のコールバック (次のモーダルへ進むか実行するか)
   state._dedupOnAccept = options && options.onAccept ? options.onAccept : null;
 
@@ -694,6 +710,37 @@ function initDedupModal() {
   const btnCancel  = document.getElementById('btn-dedup-cancel');
   const btnExecute = document.getElementById('btn-dedup-execute');
   const btnAutoAll = document.getElementById('btn-dedup-auto-all');
+  const btnDlCsv   = document.getElementById('btn-dedup-dl-csv');
+  const btnCopy    = document.getElementById('btn-dedup-copy');
+
+  // CSV ダウンロード
+  if (btnDlCsv) {
+    btnDlCsv.addEventListener('click', () => {
+      if (!_guiDedupModalData) return;
+      const csv = guiBuildDedupModalCsv(_guiDedupModalData.duplicates);
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `同名異コード一覧_${today}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // コピー用テキスト表示
+  if (btnCopy) {
+    btnCopy.addEventListener('click', () => {
+      if (!_guiDedupModalData) return;
+      _guiDedupCopyVisible = !_guiDedupCopyVisible;
+      const area = document.getElementById('dedup-modal-copy-area');
+      const ta   = document.getElementById('dedup-modal-copy-ta');
+      if (area) area.style.display = _guiDedupCopyVisible ? 'block' : 'none';
+      if (_guiDedupCopyVisible && ta) {
+        if (!ta.value) ta.value = guiBuildDedupModalTabText(_guiDedupModalData.duplicates);
+        ta.select();
+      }
+    });
+  }
 
   // キャンセル: モーダルを閉じて Step2 に戻す (非課税モーダルキャンセルと同じ挙動)
   btnCancel.addEventListener('click', () => {
@@ -753,6 +800,14 @@ function openNonTaxableModal(mismatches, options) {
     const card = buildNonTaxableCard(m, i);
     container.appendChild(card);
   });
+
+  // キャッシュ保存 + コピーエリアリセット
+  _guiNontaxModalData = mismatches;
+  _guiNontaxCopyVisible = false;
+  const copyArea = document.getElementById('nontax-modal-copy-area');
+  const copyTa   = document.getElementById('nontax-modal-copy-ta');
+  if (copyArea) copyArea.style.display = 'none';
+  if (copyTa) copyTa.value = '';
 
   // onAccept コールバックを state に保存
   state._nontaxOnAccept = options && options.onAccept ? options.onAccept : null;
@@ -838,8 +893,39 @@ function initNonTaxableModal() {
   const btnCancel = document.getElementById('btn-nontax-cancel');
   const btnExecute = document.getElementById('btn-nontax-execute');
   const btnAutoAll = document.getElementById('btn-nontax-auto-all');
+  const btnDlCsv   = document.getElementById('btn-nontax-dl-csv');
+  const btnCopy    = document.getElementById('btn-nontax-copy');
 
   if (!modal) return;
+
+  // CSV ダウンロード
+  if (btnDlCsv) {
+    btnDlCsv.addEventListener('click', () => {
+      if (!_guiNontaxModalData) return;
+      const csv = guiBuildNontaxModalCsv(_guiNontaxModalData);
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `非課税税額矛盾一覧_${today}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // コピー用テキスト表示
+  if (btnCopy) {
+    btnCopy.addEventListener('click', () => {
+      if (!_guiNontaxModalData) return;
+      _guiNontaxCopyVisible = !_guiNontaxCopyVisible;
+      const area = document.getElementById('nontax-modal-copy-area');
+      const ta   = document.getElementById('nontax-modal-copy-ta');
+      if (area) area.style.display = _guiNontaxCopyVisible ? 'block' : 'none';
+      if (_guiNontaxCopyVisible && ta) {
+        if (!ta.value) ta.value = guiBuildNontaxModalTabText(_guiNontaxModalData);
+        ta.select();
+      }
+    });
+  }
 
   btnCancel.addEventListener('click', () => {
     modal.style.display = 'none';
@@ -900,6 +986,14 @@ function openKauuriModal(mismatches, defaultKamoku) {
     const card = buildKauuriCard(m, i, defaultKamoku || '売上値引高');
     container.appendChild(card);
   });
+
+  // キャッシュ保存 + コピーエリアリセット
+  _guiKauuriModalData = mismatches;
+  _guiKauuriCopyVisible = false;
+  const copyArea = document.getElementById('kauuri-modal-copy-area');
+  const copyTa   = document.getElementById('kauuri-modal-copy-ta');
+  if (copyArea) copyArea.style.display = 'none';
+  if (copyTa) copyTa.value = '';
 
   modal.style.display = 'flex';
 }
@@ -982,8 +1076,39 @@ function initKauuriModal() {
   const btnCancel  = document.getElementById('btn-kauuri-cancel');
   const btnExecute = document.getElementById('btn-kauuri-execute');
   const btnAutoAll = document.getElementById('btn-kauuri-auto-all');
+  const btnDlCsv   = document.getElementById('btn-kauuri-dl-csv');
+  const btnCopy    = document.getElementById('btn-kauuri-copy');
 
   if (!modal) return;
+
+  // CSV ダウンロード
+  if (btnDlCsv) {
+    btnDlCsv.addEventListener('click', () => {
+      if (!_guiKauuriModalData) return;
+      const csv = guiBuildKauuriModalCsv(_guiKauuriModalData);
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `課売上マイナス起票一覧_${today}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // コピー用テキスト表示
+  if (btnCopy) {
+    btnCopy.addEventListener('click', () => {
+      if (!_guiKauuriModalData) return;
+      _guiKauuriCopyVisible = !_guiKauuriCopyVisible;
+      const area = document.getElementById('kauuri-modal-copy-area');
+      const ta   = document.getElementById('kauuri-modal-copy-ta');
+      if (area) area.style.display = _guiKauuriCopyVisible ? 'block' : 'none';
+      if (_guiKauuriCopyVisible && ta) {
+        if (!ta.value) ta.value = guiBuildKauuriModalTabText(_guiKauuriModalData);
+        ta.select();
+      }
+    });
+  }
 
   btnCancel.addEventListener('click', () => {
     modal.style.display = 'none';
@@ -1152,7 +1277,7 @@ function renderAuditSection(s) {
 
     const tbody = document.createElement('tbody');
     // 伝票No クリックでモーダルを開けるセクション
-    const hasSlipDetailClick = (sec.key === 'balanceWarnings' || sec.key === 'negativeWarnings');
+    const hasSlipDetailClick = (sec.key === 'balanceWarnings' || sec.key === 'negativeWarnings' || sec.key === 'nonTaxableSalesWarnings' || sec.key === 'businessReview');
     rows.slice(0, 200).forEach(row => {
       const tr = document.createElement('tr');
       if (Array.isArray(row)) {
@@ -1835,6 +1960,108 @@ function initRestart() {
     state.result = null;
     goToStep(1);
   });
+}
+
+// ============================================================
+// モーダル内 CSV / タブテキスト生成 (GUI版)
+// ============================================================
+
+// GUI 版 dedup モーダル: duplicates = [{name, codes:[{code, debitUsage, creditUsage, usageCount}]}]
+function guiBuildDedupModalCsv(duplicates) {
+  const headers = ['取引先名', 'コード', '借方使用', '貸方使用', '合計', '自動推奨統合先'];
+  const lines = [headers.join(',')];
+  (duplicates || []).forEach(dup => {
+    const maxUsage = Math.max(...dup.codes.map(c => c.usageCount));
+    const recommended = dup.codes.filter(c => c.usageCount === maxUsage).map(c => c.code).sort()[0] || '';
+    dup.codes.forEach(c => {
+      const cells = [
+        dup.name || '', c.code || '',
+        String(c.debitUsage || 0), String(c.creditUsage || 0), String(c.usageCount || 0),
+        c.code === recommended ? c.code : '',
+      ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+      lines.push(cells.join(','));
+    });
+  });
+  return lines.join('\r\n');
+}
+
+function guiBuildDedupModalTabText(duplicates) {
+  const headers = ['取引先名', 'コード', '借方使用', '貸方使用', '合計', '自動推奨統合先'];
+  const lines = [headers.join('\t')];
+  (duplicates || []).forEach(dup => {
+    const maxUsage = Math.max(...dup.codes.map(c => c.usageCount));
+    const recommended = dup.codes.filter(c => c.usageCount === maxUsage).map(c => c.code).sort()[0] || '';
+    dup.codes.forEach(c => {
+      lines.push([
+        dup.name || '', c.code || '',
+        String(c.debitUsage || 0), String(c.creditUsage || 0), String(c.usageCount || 0),
+        c.code === recommended ? c.code : '',
+      ].join('\t'));
+    });
+  });
+  return lines.join('\n');
+}
+
+// GUI 版 nontax モーダル: mismatches = [{slip_no, date, side, tax_label, amount, tax_amount, summary, kamoku}]
+function guiBuildNontaxModalCsv(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join(',')];
+  (mismatches || []).forEach(m => {
+    const cells = [
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '', '',
+      String(m.amount || ''), String(m.tax_amount || ''),
+      m.tax_label || '', m.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function guiBuildNontaxModalTabText(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '借方科目', '貸方科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join('\t')];
+  (mismatches || []).forEach(m => {
+    lines.push([
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '', '',
+      String(m.amount || ''), String(m.tax_amount || ''),
+      m.tax_label || '', m.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
+// GUI 版 kauuri モーダル: mismatches = [{slip_no, date, side, orig_kamoku, amount, tax_rate, summary}]
+function guiBuildKauuriModalCsv(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join(',')];
+  (mismatches || []).forEach(m => {
+    const taxLabel = (m.tax_rate === '8') ? '課売上(8%軽)' : '課売上(10%)';
+    const cells = [
+      m.slip_no || '', m.date || '', m.side || '',
+      m.orig_kamoku || '',
+      String(m.amount || ''), '',
+      taxLabel, m.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function guiBuildKauuriModalTabText(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '元税区分', '摘要'];
+  const lines = [headers.join('\t')];
+  (mismatches || []).forEach(m => {
+    const taxLabel = (m.tax_rate === '8') ? '課売上(8%軽)' : '課売上(10%)';
+    lines.push([
+      m.slip_no || '', m.date || '', m.side || '',
+      m.orig_kamoku || '',
+      String(m.amount || ''), '',
+      taxLabel, m.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
 }
 
 // ============================================================
