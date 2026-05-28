@@ -9,8 +9,10 @@ const state = {
   settings: null,   // settings object from API
   result: null,     // last convert response
   uploadToken: null,       // /api/upload-and-detect で発行されたトークン
-  duplicates: [],          // 検出された同名異コード [{name, codes:[{code,usageCount,...}]}]
-  dedupChoices: {},        // {取引先名: {action, target_code}} ユーザー選択
+  duplicates: [],          // 検出された同名異コード
+  dedupChoices: {},        // {取引先名: {action, target_code}}
+  nonTaxableMismatches: [],// 検出された非課税+税額矛盾 [{slip_no, date, side, tax_label, amount, tax_amount, summary, kamoku}]
+  nonTaxableChoices: {},   // {"<伝票No>_<側>": {action: "change-to-taxable"|"zero-tax"|"keep"}}
 };
 
 // 相対 URL を使用: Python GUI バックエンドと同一オリジン前提のため
@@ -110,11 +112,15 @@ async function apiUploadAndDetect(formData) {
   return await res.json();
 }
 
-async function apiConvertWithChoices(uploadToken, dedupChoices) {
+async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoices) {
   const res = await fetch(BASE + '/api/convert-with-choices', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uploadToken, dedupChoices }),
+    body: JSON.stringify({
+      uploadToken,
+      dedupChoices: dedupChoices || {},
+      nonTaxableChoices: nonTaxableChoices || {},
+    }),
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
@@ -303,8 +309,10 @@ async function saveSettings() {
 async function executeConvert() {
   const opts = collectFormValues();
 
-  // custom 戦略: upload-and-detect → モーダル表示
-  if (opts.outputPartners && opts.dedupStrategy === 'custom') {
+  // custom 戦略: dedup または 非課税のいずれかが custom なら upload-and-detect → モーダル表示
+  const dedupCustom = opts.outputPartners && opts.dedupStrategy === 'custom';
+  const nonTaxableCustom = opts.nonTaxableStrategy === 'custom';
+  if (dedupCustom || nonTaxableCustom) {
     await executeConvertCustomFlow(opts);
     return;
   }
@@ -375,36 +383,63 @@ async function executeConvertCustomFlow(opts) {
   state.uploadToken = detectResult.uploadToken;
   state.duplicates  = detectResult.duplicates || [];
   state.dedupChoices = {};
+  state.nonTaxableMismatches = detectResult.nonTaxableMismatches || [];
+  state.nonTaxableChoices = {};
 
-  if (state.duplicates.length === 0) {
-    // 同名異コードなし → そのまま変換実行
-    showLoading(true);
-    try {
-      const result = await apiConvertWithChoices(state.uploadToken, {});
-      state.result = result;
-      showLoading(false);
-      if (result.success) {
-        renderResultSuccess(result);
-      } else {
-        renderResultError(result.error || '変換に失敗しました', result.stderr || '');
+  // モーダル順次フロー: dedup (取引先) → non-taxable (非課税) → 実行
+  const needDedupModal = opts.outputPartners && opts.dedupStrategy === 'custom' && state.duplicates.length > 0;
+  const needNonTaxableModal = opts.nonTaxableStrategy === 'custom' && state.nonTaxableMismatches.length > 0;
+
+  if (needDedupModal) {
+    goToStep(2);
+    // dedup モーダル決定後に非課税モーダル or 実行へ進む
+    openDedupModal(state.duplicates, {
+      onAccept: async () => {
+        if (needNonTaxableModal) {
+          openNonTaxableModal(state.nonTaxableMismatches);
+        } else {
+          await runConvertWithChoices();
+        }
       }
-    } catch (e) {
-      showLoading(false);
-      renderResultError(e.message, '');
-    }
-    await renderHistory();
+    });
     return;
   }
+  if (needNonTaxableModal) {
+    goToStep(2);
+    openNonTaxableModal(state.nonTaxableMismatches);
+    return;
+  }
+  // どちらも検出なし → そのまま実行
+  await runConvertWithChoices();
+}
 
-  // 同名異コードあり → モーダル表示 (Step 3 を非表示に戻してモーダルを出す)
-  goToStep(2);
-  openDedupModal(state.duplicates);
+async function runConvertWithChoices() {
+  showLoading(true);
+  goToStep(3);
+  try {
+    const result = await apiConvertWithChoices(
+      state.uploadToken,
+      state.dedupChoices,
+      state.nonTaxableChoices
+    );
+    state.result = result;
+    showLoading(false);
+    if (result.success) {
+      renderResultSuccess(result);
+    } else {
+      renderResultError(result.error || '変換に失敗しました', result.stderr || '');
+    }
+  } catch (e) {
+    showLoading(false);
+    renderResultError(e.message, '');
+  }
+  await renderHistory();
 }
 
 // ============================================================
 // Dedup modal
 // ============================================================
-function openDedupModal(duplicates) {
+function openDedupModal(duplicates, options) {
   const modal = document.getElementById('dedup-modal');
   const desc  = document.getElementById('dedup-modal-desc');
   const container = document.getElementById('dedup-cards-container');
@@ -416,6 +451,9 @@ function openDedupModal(duplicates) {
     const card = buildDedupCard(dup, dupIdx);
     container.appendChild(card);
   });
+
+  // 確定時のコールバック (次のモーダルへ進むか実行するか)
+  state._dedupOnAccept = options && options.onAccept ? options.onAccept : null;
 
   modal.style.display = 'flex';
 }
@@ -549,28 +587,109 @@ function initDedupModal() {
     showToast('全て最頻使用コードに統合を設定しました', 'success');
   });
 
-  // 決定して変換実行
+  // 決定して次へ
   btnExecute.addEventListener('click', async () => {
     modal.style.display = 'none';
     state.dedupChoices = collectDedupChoices();
 
-    goToStep(3);
-    showLoading(true);
-
-    try {
-      const result = await apiConvertWithChoices(state.uploadToken, state.dedupChoices);
-      state.result = result;
-      showLoading(false);
-      if (result.success) {
-        renderResultSuccess(result);
-      } else {
-        renderResultError(result.error || '変換に失敗しました', result.stderr || '');
-      }
-    } catch (e) {
-      showLoading(false);
-      renderResultError(e.message, '');
+    // onAccept コールバックがあれば呼ぶ (次の非課税モーダル or 実行)
+    if (state._dedupOnAccept) {
+      const cb = state._dedupOnAccept;
+      state._dedupOnAccept = null;
+      await cb();
+      return;
     }
-    await renderHistory();
+
+    // フォールバック: 直接実行
+    await runConvertWithChoices();
+  });
+}
+
+// ============================================================
+// Non-taxable mismatch modal
+// ============================================================
+function openNonTaxableModal(mismatches) {
+  const modal = document.getElementById('nontax-modal');
+  const desc = document.getElementById('nontax-modal-desc');
+  const container = document.getElementById('nontax-cards-container');
+
+  desc.textContent = `非課税区分 (非仕入/非売上) なのに税額が入っている行が ${mismatches.length} 件見つかりました。freee エラーを避けるため、各行の対処を選んでください。`;
+
+  container.innerHTML = '';
+  mismatches.forEach((m, i) => {
+    const card = buildNonTaxableCard(m, i);
+    container.appendChild(card);
+  });
+
+  modal.style.display = 'flex';
+}
+
+function buildNonTaxableCard(m, idx) {
+  const card = document.createElement('div');
+  card.className = 'dedup-card';
+  card.dataset.key = `${m.slip_no}_${m.side}`;
+
+  const taxableCode = (m.tax_label === '非仕入') ? '課対仕入10%' : '課税売上10%';
+  const summaryShort = (m.summary || '').slice(0, 30);
+  const kamoku = m.kamoku || '';
+
+  const radioName = `nontax_${idx}`;
+  card.innerHTML = `
+    <div class="dedup-card-header">
+      <strong>伝票 No.${m.slip_no}</strong> <span style="color:#666">(${m.date}) ${m.side}</span>
+    </div>
+    <div class="dedup-card-codes" style="margin:8px 0; font-size:14px; color:#555">
+      税区分: <strong>${m.tax_label}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
+      勘定科目: ${kamoku} / 摘要: ${summaryShort}
+    </div>
+    <div class="dedup-card-options" style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
+      <label><input type="radio" name="${radioName}" value="change-to-taxable" checked> 税区分を <strong>${taxableCode}</strong> に変更 (推奨、税控除あり)</label>
+      <label><input type="radio" name="${radioName}" value="zero-tax"> 税額を 0 に修正 (税区分維持、税控除なし)</label>
+      <label><input type="radio" name="${radioName}" value="keep"> そのまま (freee エラー継続)</label>
+    </div>
+  `;
+  return card;
+}
+
+function collectNonTaxableChoices() {
+  const result = {};
+  const cards = document.querySelectorAll('#nontax-cards-container .dedup-card');
+  cards.forEach(card => {
+    const key = card.dataset.key;
+    const checked = card.querySelector('input[type=radio]:checked');
+    if (key && checked) {
+      result[key] = { action: checked.value };
+    }
+  });
+  return result;
+}
+
+function initNonTaxableModal() {
+  const modal = document.getElementById('nontax-modal');
+  const btnCancel = document.getElementById('btn-nontax-cancel');
+  const btnExecute = document.getElementById('btn-nontax-execute');
+  const btnAutoAll = document.getElementById('btn-nontax-auto-all');
+
+  if (!modal) return;
+
+  btnCancel.addEventListener('click', () => {
+    modal.style.display = 'none';
+    goToStep(2);
+  });
+
+  btnAutoAll.addEventListener('click', () => {
+    const cards = document.querySelectorAll('#nontax-cards-container .dedup-card');
+    cards.forEach(card => {
+      const radio = card.querySelector('input[value="change-to-taxable"]');
+      if (radio) radio.checked = true;
+    });
+    showToast('全て「課対仕入10%/課税売上10% に変更」を設定しました', 'success');
+  });
+
+  btnExecute.addEventListener('click', async () => {
+    modal.style.display = 'none';
+    state.nonTaxableChoices = collectNonTaxableChoices();
+    await runConvertWithChoices();
   });
 }
 
@@ -976,6 +1095,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initCollapsibles();
   initShutdownModal();
   initDedupModal();
+  initNonTaxableModal();
   initRestart();
 
   // Load settings from server

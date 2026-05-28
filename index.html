@@ -432,7 +432,21 @@
     <div class="modal-body" id="dedup-modal-body"></div>
     <div class="modal-footer">
       <button class="btn btn-secondary btn-sm" onclick="dedupAutoAll()">全件 自動推奨で決定</button>
-      <button class="btn btn-primary" onclick="dedupConfirm()">決定して変換実行</button>
+      <button class="btn btn-primary" onclick="dedupConfirm()">次へ (確定)</button>
+    </div>
+  </div>
+</div>
+
+<!-- Non-taxable mismatch modal -->
+<div class="modal-overlay" id="nontax-modal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">非課税+税額矛盾 — 対処を選択してください</div>
+    </div>
+    <div class="modal-body" id="nontax-modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary btn-sm" onclick="nontaxAutoAll()">全件 課対仕入10%/課税売上10% に変更</button>
+      <button class="btn btn-primary" onclick="nontaxConfirm()">決定して変換実行</button>
     </div>
   </div>
 </div>
@@ -1285,13 +1299,27 @@ async function executeConversion() {
       }
     }
 
+    // 非課税+税額矛盾の interactive/custom 戦略: モーダルでユーザーに選ばせる
+    let effectiveNonTaxableStrategy = opts.nonTaxableStrategy;
+    let effectiveNonTaxableCustom = opts.nonTaxableCustom || null;
+    if (opts.nonTaxableStrategy === 'interactive' || opts.nonTaxableStrategy === 'custom') {
+      const ntMismatches = detectNonTaxableFromGroups(allGroups);
+      if (ntMismatches.length > 0) {
+        effectiveNonTaxableCustom = await showNonTaxableModal(ntMismatches);
+        effectiveNonTaxableStrategy = 'custom';
+      } else {
+        // 検出ゼロ → 影響なし
+        effectiveNonTaxableStrategy = 'warn-only';
+      }
+    }
+
     // グループ処理 (非課税戦略も適用)
     const {allRows, slipSizes, totalSkipped} = processGroups(
       allGroups,
       Object.keys(codeRewriteMap).length ? codeRewriteMap : null,
       Object.keys(nameOverrideMap).length ? nameOverrideMap : null,
-      opts.nonTaxableStrategy,
-      opts.nonTaxableCustom || null
+      effectiveNonTaxableStrategy,
+      effectiveNonTaxableCustom
     );
 
     // 借貸整合性チェック
@@ -1449,6 +1477,100 @@ function showDedupModal(sameNameGroups, allGroups) {
 
 function dedupAutoAll() { if(window._dedupResolve) window._dedupResolve(true); }
 function dedupConfirm() { if(window._dedupResolve) window._dedupResolve(false); }
+
+// ===========================================================================
+// 非課税+税額矛盾 対話モーダル
+// ===========================================================================
+
+function detectNonTaxableMismatchesInRaw(rawRowsByFile) {
+  // rawRowsByFile: Map(filename, [headerRow, ...dataRows]) — 各 CSV のヘッダー込み配列
+  // 既存の readObcCsv が headerIdx を返さないため、ここで再走査して非課税矛盾を検出
+  // (簡略実装: グループ化済 allGroups からは元の税ラベルが残っているが税額生値が残らないため、
+  //  別途検出するか、obcRowToFreee 段階で行ごとに記録する)
+  // → 既に obcRowToFreee で drTaxLabel/crTaxLabel/drTaxAmount/crTaxAmount を保持しているため、
+  //   ここでは allGroups を走査して検出する別アプローチを取る
+  return [];
+}
+
+function detectNonTaxableFromGroups(allGroups) {
+  // allGroups から非課税+税額矛盾の行を抽出
+  // 各 r オブジェクトは drTaxCode (freee 変換後), drTaxLabel (奉行原本), drTaxAmount を持つ
+  const results = [];
+  for (const [key, rows] of allGroups) {
+    for (const r of rows) {
+      // 借方
+      if ((r.drTaxLabel === '非仕入' || r.drTaxLabel === '非売上') && parseInt(String(r.drTaxAmount||'0'), 10) !== 0) {
+        results.push({
+          slip_no: r.slipNo, date: r.date, side: '借方',
+          tax_label: r.drTaxLabel,
+          amount: parseInt(String(r.drAmount||'0'), 10),
+          tax_amount: parseInt(String(r.drTaxAmount||'0'), 10),
+          summary: r.summary || '', kamoku: r.drKamoku || '',
+        });
+      }
+      // 貸方 (奉行原本のラベル: crTaxLabel が存在しないケース → freee 変換後の crTaxCode で判定するしかない)
+      if (r.crTaxLabel && (r.crTaxLabel === '非仕入' || r.crTaxLabel === '非売上') && parseInt(String(r.crTaxAmount||'0'), 10) !== 0) {
+        results.push({
+          slip_no: r.slipNo, date: r.date, side: '貸方',
+          tax_label: r.crTaxLabel,
+          amount: parseInt(String(r.crAmount||'0'), 10),
+          tax_amount: parseInt(String(r.crTaxAmount||'0'), 10),
+          summary: r.summary || '', kamoku: r.crKamoku || '',
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function showNonTaxableModal(mismatches) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('nontax-modal');
+    const body = document.getElementById('nontax-modal-body');
+
+    body.innerHTML = mismatches.map((m, idx) => {
+      const taxableCode = m.tax_label === '非仕入' ? '課対仕入10%' : '課税売上10%';
+      const summaryShort = (m.summary || '').slice(0, 30);
+      const radioName = `nontax_${idx}`;
+      return `
+        <div class="dedup-card" data-key="${m.slip_no}_${m.side}" data-idx="${idx}">
+          <div class="dedup-card-name">伝票 No.${escHtml(m.slip_no)} (${escHtml(m.date)}) ${escHtml(m.side)}</div>
+          <div style="margin:8px 0; font-size:14px; color:#555">
+            税区分: <strong>${escHtml(m.tax_label)}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
+            勘定科目: ${escHtml(m.kamoku || '')} / 摘要: ${escHtml(summaryShort)}
+          </div>
+          <div class="radio-options">
+            <label><input type="radio" name="${radioName}" value="change-to-taxable" checked> 税区分を <strong>${taxableCode}</strong> に変更 (推奨、税控除あり)</label>
+            <label><input type="radio" name="${radioName}" value="zero-tax"> 税額を 0 に修正 (税区分維持、税控除なし)</label>
+            <label><input type="radio" name="${radioName}" value="keep"> そのまま (freee エラー継続)</label>
+          </div>
+        </div>`;
+    }).join('');
+
+    modal.style.display = 'flex';
+
+    window._nontaxResolve = (autoAll) => {
+      const choices = {};
+      body.querySelectorAll('.dedup-card').forEach(card => {
+        const key = card.dataset.key;
+        const idx = card.dataset.idx;
+        let action;
+        if (autoAll) {
+          action = 'change-to-taxable';
+        } else {
+          const checked = card.querySelector(`input[name="nontax_${idx}"]:checked`);
+          action = checked ? checked.value : 'change-to-taxable';
+        }
+        choices[key] = { action };
+      });
+      modal.style.display = 'none';
+      resolve(choices);
+    };
+  });
+}
+
+function nontaxAutoAll() { if(window._nontaxResolve) window._nontaxResolve(true); }
+function nontaxConfirm() { if(window._nontaxResolve) window._nontaxResolve(false); }
 
 // ===========================================================================
 // 結果レンダリング

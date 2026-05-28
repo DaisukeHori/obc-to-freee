@@ -339,6 +339,35 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3"/>
           </svg>
+          次へ (確定)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Non-taxable mismatch modal (custom 戦略) -->
+  <div id="nontax-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box modal-box-lg">
+      <h3>非課税+税額矛盾の対処を選択</h3>
+      <p id="nontax-modal-desc">税区分が「非仕入/非売上」(非課税) なのに税額が入っている行が見つかりました。freee エラーを避けるため、各行の対処を選んでください。</p>
+
+      <div class="dedup-modal-toolbar">
+        <button type="button" id="btn-nontax-auto-all" class="btn btn-ghost btn-sm-inner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          全て自動推奨 (課対仕入10%/課税売上10% に変更)
+        </button>
+      </div>
+
+      <div id="nontax-cards-container" class="dedup-cards-container"></div>
+
+      <div class="modal-actions" style="margin-top:20px">
+        <button id="btn-nontax-cancel" class="btn btn-ghost">キャンセル</button>
+        <button id="btn-nontax-execute" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
           決定して変換実行
         </button>
       </div>
