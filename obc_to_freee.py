@@ -786,11 +786,23 @@ def find_group_bumon(rows: list) -> str:
 
 def to_freee_row(r: dict,
                  code_rewrite_map: dict = None,
-                 name_override_map: dict = None) -> list:
+                 name_override_map: dict = None,
+                 non_taxable_strategy: str = "warn-only",
+                 non_taxable_custom: dict = None) -> list:
     """辞書をfreee33列リストに変換する。
 
     code_rewrite_map: {古コード: 新コード, ...} 統合時に取引先コードを書き換える
     name_override_map: {コード: 新名前, ...}   別名化時に取引先名を書き換える
+    non_taxable_strategy: 非課税区分(非課仕入/非課売上) + 税額>0 の矛盾対処戦略
+      warn-only          : そのまま出力 (freee で「非課仕入では税額を入力できません」エラー)
+      zero-tax           : 税額を 0 に書き換え (freee エラー回避、ただし消費税控除は取れない)
+      change-to-taxable  : 税区分を非課税 → 課対仕入10%/課税売上10% に書き換え
+                          (税額計算とつじつまが合う、奉行起票時の誤り想定)
+      custom             : non_taxable_custom (dict) のキー "<伝票No>_<側>" から
+                          action を引いて行単位で適用
+      interactive        : (CLI で事前に対話した結果を non_taxable_custom 経由で受ける)
+    non_taxable_custom: custom/interactive 戦略時の選択。
+      {"<伝票No>_<側>": {"action": "zero-tax"|"change-to-taxable"|"keep"}, ...}
     """
     dr_code = r["dr_partner_code"]
     cr_code = r["cr_partner_code"]
@@ -809,6 +821,45 @@ def to_freee_row(r: dict,
         if cr_code in name_override_map:
             cr_name = name_override_map[cr_code]
 
+    # 非課税区分 + 税額あり の矛盾対処
+    dr_tax_code = r["dr_tax_code"]
+    dr_tax_amount = r["dr_tax_amount"]
+    cr_tax_code = r["cr_tax_code"]
+    cr_tax_amount = r["cr_tax_amount"]
+
+    def _parse_int(s):
+        try:
+            return int(str(s).strip()) if str(s).strip() not in ("", "0") else 0
+        except (ValueError, TypeError):
+            return 0
+
+    def _resolve_action(side: str) -> str:
+        """この行の側 (借方/貸方) に適用する action を返す。
+        return: 'zero-tax' | 'change-to-taxable' | 'keep'
+        """
+        if non_taxable_strategy in ("zero-tax", "change-to-taxable"):
+            return non_taxable_strategy
+        if non_taxable_strategy in ("custom", "interactive") and non_taxable_custom:
+            key = f"{r.get('slip_no', '')}_{side}"
+            choice = non_taxable_custom.get(key, {})
+            return choice.get("action", "keep")
+        return "keep"  # warn-only or unspecified
+
+    # 借方側
+    if dr_tax_code in ("非課仕入", "非課売上") and _parse_int(dr_tax_amount) != 0:
+        act = _resolve_action("借方")
+        if act == "zero-tax":
+            dr_tax_amount = "0"
+        elif act == "change-to-taxable":
+            dr_tax_code = "課対仕入10%" if dr_tax_code == "非課仕入" else "課税売上10%"
+    # 貸方側
+    if cr_tax_code in ("非課仕入", "非課売上") and _parse_int(cr_tax_amount) != 0:
+        act = _resolve_action("貸方")
+        if act == "zero-tax":
+            cr_tax_amount = "0"
+        elif act == "change-to-taxable":
+            cr_tax_code = "課対仕入10%" if cr_tax_code == "非課仕入" else "課税売上10%"
+
     return [
         "[明細行]",  # [表題行]
         r["date"],           # 日付
@@ -826,8 +877,8 @@ def to_freee_row(r: dict,
         "",                  # 借方セグメント2
         "",                  # 借方セグメント3
         r["dr_amount"],      # 借方金額
-        r["dr_tax_code"],    # 借方税区分
-        r["dr_tax_amount"],  # 借方税額
+        dr_tax_code,         # 借方税区分 (戦略適用後)
+        dr_tax_amount,       # 借方税額 (戦略適用後)
         r["cr_kamoku"],      # 貸方勘定科目
         "",                  # 貸方科目コード
         r["cr_hojo"],        # 貸方補助科目
@@ -840,8 +891,8 @@ def to_freee_row(r: dict,
         "",                  # 貸方セグメント2
         "",                  # 貸方セグメント3
         r["cr_amount"],      # 貸方金額
-        r["cr_tax_code"],    # 貸方税区分
-        r["cr_tax_amount"],  # 貸方税額
+        cr_tax_code,         # 貸方税区分 (戦略適用後)
+        cr_tax_amount,       # 貸方税額 (戦略適用後)
         r["summary"],        # 摘要
     ]
 
@@ -969,7 +1020,9 @@ def read_obc_csv(filepath: str, date_from=None, date_to=None,
 
 def process_groups(groups: OrderedDict,
                    code_rewrite_map: dict = None,
-                   name_override_map: dict = None) -> tuple:
+                   name_override_map: dict = None,
+                   non_taxable_strategy: str = "warn-only",
+                   non_taxable_custom: dict = None) -> tuple:
     """
     全グループに複合補完を適用し、(freee33列の行リスト, グループ別行数リスト) を返す。
     グループ別行数リストは [(key, freee行数), ...] の順序付きリスト。
@@ -977,6 +1030,7 @@ def process_groups(groups: OrderedDict,
     実際の出力行数を正確に計算する。
 
     code_rewrite_map / name_override_map が指定された場合は to_freee_row() で適用する。
+    non_taxable_strategy / non_taxable_custom: 非課税矛盾の対処 (to_freee_row 参照)。
     """
     all_rows = []
     slip_sizes = []
@@ -987,7 +1041,9 @@ def process_groups(groups: OrderedDict,
         total_skipped += skipped
         freee_rows = [
             to_freee_row(r, code_rewrite_map=code_rewrite_map,
-                         name_override_map=name_override_map)
+                         name_override_map=name_override_map,
+                         non_taxable_strategy=non_taxable_strategy,
+                         non_taxable_custom=non_taxable_custom)
             for r in completed
         ]
         all_rows.extend(freee_rows)
@@ -1665,12 +1721,93 @@ def print_partner_warnings(partner_data: dict):
 # 奉行原本監査 (stderr 出力)
 # ---------------------------------------------------------------------------
 
+def _detect_non_taxable_mismatches(input_files: list, date_from=None, date_to=None,
+                                    encoding: str = "auto") -> list:
+    """
+    奉行原本から非課税区分 (非仕入/非売上) + 税額 > 0 の矛盾行を検出して返す。
+    返り値: [{"slip_no": ..., "date": ..., "side": "借方"|"貸方", "tax_label": ...,
+              "amount": ..., "tax_amount": ..., "summary": ...}, ...]
+    audit_obc_source / interactive / detect-only / custom 全てで使う共通関数。
+    """
+    results = []
+    for fpath in input_files:
+        try:
+            if encoding == "auto":
+                enc = detect_encoding(fpath)
+            else:
+                enc = encoding
+            with open(fpath, encoding=enc, errors="replace") as f:
+                reader = csv.reader(f)
+                try:
+                    header_row = next(reader)
+                except StopIteration:
+                    continue
+                header_idx = build_header_index(header_row)
+                for row in reader:
+                    if not row:
+                        continue
+                    date_str = get_col(row, header_idx, OBC_COL_DATE).strip()
+                    if not date_str:
+                        continue
+                    if date_from or date_to:
+                        try:
+                            row_date = datetime.strptime(date_str, "%Y/%m/%d")
+                            if date_from and row_date < date_from:
+                                continue
+                            if date_to and row_date > date_to:
+                                continue
+                        except ValueError:
+                            pass
+                    slip_no = get_col(row, header_idx, OBC_COL_SLIP_NO).strip()
+                    summary = get_col(row, header_idx, OBC_COL_SUMMARY).strip()
+                    dr_kamoku = get_col(row, header_idx, OBC_COL_DR_KAMOKU).strip()
+                    cr_kamoku = get_col(row, header_idx, OBC_COL_CR_KAMOKU).strip()
+                    dr_val = get_col(row, header_idx, OBC_COL_DR_AMOUNT).strip()
+                    cr_val = get_col(row, header_idx, OBC_COL_CR_AMOUNT).strip()
+                    dr_tax_amount_str = get_col(row, header_idx, OBC_COL_DR_TAX_AMOUNT).strip()
+                    cr_tax_amount_str = get_col(row, header_idx, OBC_COL_CR_TAX_AMOUNT).strip()
+                    dr_tax_label = get_col(row, header_idx, OBC_COL_DR_TAX_LABEL).strip()
+                    cr_tax_label = get_col(row, header_idx, OBC_COL_CR_TAX_LABEL).strip()
+                    if dr_tax_label in ("非仕入", "非売上"):
+                        try:
+                            dr_tax_amt = int(dr_tax_amount_str) if dr_tax_amount_str else 0
+                            if dr_tax_amt != 0:
+                                dr_amt = int(dr_val) if dr_val else 0
+                                results.append({
+                                    "slip_no": slip_no, "date": date_str, "side": "借方",
+                                    "tax_label": dr_tax_label, "amount": dr_amt,
+                                    "tax_amount": dr_tax_amt, "summary": summary,
+                                    "kamoku": dr_kamoku,
+                                })
+                        except ValueError:
+                            pass
+                    if cr_tax_label in ("非仕入", "非売上"):
+                        try:
+                            cr_tax_amt = int(cr_tax_amount_str) if cr_tax_amount_str else 0
+                            if cr_tax_amt != 0:
+                                cr_amt = int(cr_val) if cr_val else 0
+                                results.append({
+                                    "slip_no": slip_no, "date": date_str, "side": "貸方",
+                                    "tax_label": cr_tax_label, "amount": cr_amt,
+                                    "tax_amount": cr_tax_amt, "summary": summary,
+                                    "kamoku": cr_kamoku,
+                                })
+                        except ValueError:
+                            pass
+        except OSError:
+            pass
+    return results
+
+
 def audit_obc_source(input_files: list, date_from=None, date_to=None,
                      quiet: bool = False, encoding: str = "auto"):
     """
-    奉行原本 CSV を直接走査して以下の2種を stderr に出力する。
+    奉行原本 CSV を直接走査して以下の3種を stderr に出力する。
       A: 伝票単位の借貸不一致 (借方本体金額, 貸方本体金額 カラムで集計)
-      B: 課売上 + マイナス金額の返品疑い行 (借方/貸方税区分略称 カラムで判定)
+      B: 課売上 + マイナス金額の返品疑い行
+      C: 非課税区分 (非仕入/非売上) + 税額 > 0 の矛盾行
+         (奉行起票時に税区分は非課税なのに税額が入っているケース。
+          freee で「非課仕入では税額を入力できません」エラーになる)
 
     date_from/date_to の期間外伝票は除外 (変換対象と同一範囲のみ警告)。
     quiet=True の場合は何も出力しない。
@@ -1687,6 +1824,9 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     # B: 返品疑い行リスト [(slip_no, date_str, side, amount, summary), ...]
     minus_kaubai: list = []
+
+    # C: 非課税+税額矛盾行リスト [(slip_no, date_str, side, tax_label, amount, tax_amount, kamoku, summary), ...]
+    non_taxable_mismatches: list = []
 
     for fpath in input_files:
         try:
@@ -1762,6 +1902,34 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
                         except ValueError:
                             pass
 
+                    # --- C: 非課税区分 + 税額あり 矛盾検出 ---
+                    dr_tax_amount_str = get_col(row, header_idx, OBC_COL_DR_TAX_AMOUNT).strip()
+                    cr_tax_amount_str = get_col(row, header_idx, OBC_COL_CR_TAX_AMOUNT).strip()
+
+                    # 借方側
+                    if dr_tax_label in ("非仕入", "非売上"):
+                        try:
+                            dr_tax_amt = int(dr_tax_amount_str) if dr_tax_amount_str else 0
+                            if dr_tax_amt != 0:
+                                dr_amt = int(dr_val) if dr_val else 0
+                                non_taxable_mismatches.append(
+                                    (slip_no, date_str, "借方", dr_tax_label, dr_amt, dr_tax_amt, summary)
+                                )
+                        except ValueError:
+                            pass
+
+                    # 貸方側
+                    if cr_tax_label in ("非仕入", "非売上"):
+                        try:
+                            cr_tax_amt = int(cr_tax_amount_str) if cr_tax_amount_str else 0
+                            if cr_tax_amt != 0:
+                                cr_amt = int(cr_val) if cr_val else 0
+                                non_taxable_mismatches.append(
+                                    (slip_no, date_str, "貸方", cr_tax_label, cr_amt, cr_tax_amt, summary)
+                                )
+                        except ValueError:
+                            pass
+
         except OSError as e:
             print(f"WARN: 監査用ファイル読み込み失敗: {fpath}: {e}", file=sys.stderr)
 
@@ -1817,8 +1985,32 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
-    print("変換処理は正常完了しました。上記は freee エラー扱いではなく、", file=sys.stderr)
-    print("経理担当の業務的確認を推奨する項目です。", file=sys.stderr)
+    print("[要確認 3/3] 非課税区分 + 税額あり (freee インポートエラー対象)", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("奉行原本で税区分が「非仕入」「非売上」(=非課税) なのに税額が入っている", file=sys.stderr)
+    print("矛盾起票です。freee は「非課仕入では税額を入力できません」エラーを返すため、", file=sys.stderr)
+    print("以下のいずれかの対処が必要:", file=sys.stderr)
+    print("  - 奉行で該当伝票の税区分を「課仕入/課売上」に修正して再エクスポート (推奨)", file=sys.stderr)
+    print("  - --non-taxable-mismatch-strategy=zero-tax で税額を 0 に修正", file=sys.stderr)
+    print("  - --non-taxable-mismatch-strategy=change-to-taxable で税区分を", file=sys.stderr)
+    print("    課対仕入10%/課税売上10% に自動変更 (税額計算と整合)", file=sys.stderr)
+    print("", file=sys.stderr)
+    if non_taxable_mismatches:
+        for slip_no, date_str, side, tax_label, amount, tax_amount, summary in non_taxable_mismatches:
+            summary_short = summary[:20] if summary else ""
+            print(
+                f"  No. {slip_no} ({date_str}) {side} 税区分 {tax_label} / "
+                f"本体 {amount:,} / 税額 {tax_amount:,} 摘要: {summary_short}",
+                file=sys.stderr,
+            )
+        print(f"  合計 {len(non_taxable_mismatches)} 件", file=sys.stderr)
+    else:
+        print("  (該当なし)", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("変換処理は正常完了しました。上記 1/2・2/2 は freee エラー扱いではなく", file=sys.stderr)
+    print("経理担当の業務的確認推奨、3/3 は freee がエラーで弾く項目です。", file=sys.stderr)
     print(sep, file=sys.stderr)
 
 
@@ -1896,6 +2088,41 @@ def main():
             " (デフォルト: 空 = すべて未知扱い)"
         ),
     )
+    parser.add_argument(
+        "--non-taxable-mismatch-strategy",
+        dest="non_taxable_strategy",
+        choices=["warn-only", "zero-tax", "change-to-taxable",
+                 "interactive", "custom"],
+        default="warn-only",
+        help=(
+            "非課税区分 (非仕入/非売上) + 税額あり 矛盾の対処戦略 (デフォルト: warn-only)。"
+            "warn-only=警告のみで freee エラー継続 / "
+            "zero-tax=税額を0に修正 (freee エラー回避、消費税控除なし) / "
+            "change-to-taxable=税区分を課対仕入10%%/課税売上10%% に変更 (推奨、税控除も取れる) / "
+            "interactive=各件を標準入力で対話選択 / "
+            "custom=--non-taxable-mismatch-custom-json で指定した JSON に従う"
+        ),
+    )
+    parser.add_argument(
+        "--non-taxable-mismatch-custom-json",
+        dest="non_taxable_custom_json",
+        default=None,
+        help=(
+            "--non-taxable-mismatch-strategy=custom 時のカスタム選択 JSON ファイルパス。"
+            'フォーマット: {"<伝票No>_<側>": {"action": "zero-tax"|"change-to-taxable"|"keep"}, ...}'
+            ' 例: {"001808_借方": {"action": "change-to-taxable"}}'
+        ),
+    )
+    parser.add_argument(
+        "--detect-non-taxable-only",
+        dest="detect_non_taxable_only",
+        action="store_true",
+        default=False,
+        help=(
+            "非課税+税額矛盾を検出して JSON 形式で stdout に出力し、変換は行わない。"
+            "GUI の対話フロー Phase 1 で使用。"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -1931,6 +2158,14 @@ def main():
 
     print(f"合計入力行数 (期間フィルタ後): {total_input}")
     print(f"伝票グループ数: {len(all_groups)}")
+
+    # --detect-non-taxable-only モード: 非課税+税額矛盾を検出して JSON 出力して終了
+    if args.detect_non_taxable_only:
+        detected = _detect_non_taxable_mismatches(
+            args.input, date_from, date_to, encoding=args.encoding
+        )
+        print(json.dumps({"success": True, "mismatches": detected}, ensure_ascii=False, indent=2))
+        return
 
     # --detect-duplicates-only モード: 同名異コード検出して JSON 出力して終了
     if args.detect_duplicates_only:
@@ -1984,12 +2219,59 @@ def main():
             custom_choices=custom_choices,
         )
 
+    # 非課税+税額矛盾の対処準備
+    non_taxable_custom: dict = None
+    if args.non_taxable_strategy == "custom" and args.non_taxable_custom_json:
+        try:
+            with open(args.non_taxable_custom_json, "r", encoding="utf-8") as _f:
+                non_taxable_custom = json.load(_f)
+            print(f"[非課税矛盾] custom 選択 JSON 読み込み: {args.non_taxable_custom_json} ({len(non_taxable_custom)} 件)")
+        except Exception as e:
+            print(f"[非課税矛盾] custom JSON 読み込み失敗: {e} — warn-only にフォールバック", file=sys.stderr)
+            args.non_taxable_strategy = "warn-only"
+    elif args.non_taxable_strategy == "interactive":
+        # 検出 → 標準入力で各件選択
+        detected = _detect_non_taxable_mismatches(
+            args.input, date_from, date_to, encoding=args.encoding
+        )
+        if detected:
+            print("", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            print(f"[interactive] 非課税+税額矛盾 {len(detected)} 件を検出。各件の対処方法を選んでください。", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            non_taxable_custom = {}
+            for i, m in enumerate(detected, 1):
+                print(f"\n[{i}/{len(detected)}] 伝票 No.{m['slip_no']} ({m['date']}) {m['side']}", file=sys.stderr)
+                print(f"  税区分: {m['tax_label']} / 本体 {m['amount']:,} / 税額 {m['tax_amount']:,}", file=sys.stderr)
+                print(f"  勘定科目: {m.get('kamoku','')} / 摘要: {m['summary'][:30]}", file=sys.stderr)
+                print(f"  対処を選択:", file=sys.stderr)
+                print(f"    (1) change-to-taxable: 税区分を {'課対仕入10%' if m['tax_label']=='非仕入' else '課税売上10%'} に変更 (推奨、税控除あり)", file=sys.stderr)
+                print(f"    (2) zero-tax: 税額を 0 に修正 (税区分維持、税控除なし)", file=sys.stderr)
+                print(f"    (k) keep: そのまま (freee エラー継続)", file=sys.stderr)
+                while True:
+                    sys.stderr.write("選択 (1/2/k、デフォルト 1): ")
+                    sys.stderr.flush()
+                    line = sys.stdin.readline().strip().lower()
+                    if line in ("", "1"):
+                        action = "change-to-taxable"; break
+                    elif line == "2":
+                        action = "zero-tax"; break
+                    elif line == "k":
+                        action = "keep"; break
+                    else:
+                        print("不正な選択です。1/2/k を入力してください。", file=sys.stderr)
+                key = f"{m['slip_no']}_{m['side']}"
+                non_taxable_custom[key] = {"action": action}
+            print("\n[interactive] 全件の選択を保存しました。", file=sys.stderr)
+
     # 全グループ変換 (process_groups は (all_rows, slip_sizes) を返す)
     # dedup 後の code_rewrite_map / name_override_map を仕訳行に反映する
     all_rows, slip_sizes = process_groups(
         all_groups,
         code_rewrite_map=code_rewrite_map if code_rewrite_map else None,
         name_override_map=name_override_map if name_override_map else None,
+        non_taxable_strategy=args.non_taxable_strategy,
+        non_taxable_custom=non_taxable_custom,
     )
     print(f"出力行数: {len(all_rows)}")
 

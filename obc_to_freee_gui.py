@@ -526,10 +526,11 @@ class Handler(BaseHTTPRequestHandler):
             partners_prefix = fields.get("partnersPrefix", "freee取引先マスタ").strip() or "freee取引先マスタ"
             encoding = fields.get("encoding", "auto").strip() or "auto"
             dedup_strategy = fields.get("dedupStrategy", "warn-only").strip() or "warn-only"
+            non_taxable_strategy = fields.get("nonTaxableStrategy", "warn-only").strip() or "warn-only"
 
             input_file_data = files  # [{ "filename": str, "data": bytes }]
 
-            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}")
+            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}, non_taxable={non_taxable_strategy}")
 
             if not input_file_data:
                 self._send_json({"success": False, "error": "入力ファイルが指定されていません"})
@@ -578,6 +579,11 @@ class Handler(BaseHTTPRequestHandler):
                 valid_strategies = {"warn-only", "interactive", "merge-lowest", "merge-highest", "merge-most-used", "suffix", "custom"}
                 if dedup_strategy in valid_strategies and dedup_strategy != "warn-only":
                     cmd += ["--dedup-strategy", dedup_strategy]
+
+            # 非課税+税額矛盾の戦略 (warn-only/zero-tax/change-to-taxable のみ受け付け、interactive/custom は別フローで)
+            valid_nt_strategies = {"warn-only", "zero-tax", "change-to-taxable"}
+            if non_taxable_strategy in valid_nt_strategies and non_taxable_strategy != "warn-only":
+                cmd += ["--non-taxable-mismatch-strategy", non_taxable_strategy]
 
             print(f"[GUI] 実行: {' '.join(cmd)}")
 
@@ -736,12 +742,48 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"[GUI] detect JSON パース失敗: {e}")
 
+            # --detect-non-taxable-only で非課税+税額矛盾を検出
+            cmd_nt = [
+                sys.executable,
+                str(SCRIPT_DIR / "obc_to_freee.py"),
+                "--input", *input_paths,
+                "--output-dir", str(upload_dir),
+                "--output-prefix", "detect_tmp_nt",
+                "--encoding", encoding,
+                "--detect-non-taxable-only",
+            ]
+            if date_from:
+                cmd_nt += ["--from", date_from]
+            if date_to:
+                cmd_nt += ["--to", date_to]
+            result_nt = subprocess.run(
+                cmd_nt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(SCRIPT_DIR),
+            )
+            non_taxable_mismatches = []
+            if result_nt.returncode == 0 and result_nt.stdout.strip():
+                try:
+                    # detect-non-taxable-only は stdout 末尾に JSON を出力 (前段に進捗ログあり)
+                    # JSON 部分のみ抽出 ({ から始まる行を探す)
+                    stdout_text = result_nt.stdout.strip()
+                    json_start = stdout_text.find("{")
+                    if json_start >= 0:
+                        nt_result = json.loads(stdout_text[json_start:])
+                        non_taxable_mismatches = nt_result.get("mismatches", [])
+                except Exception as e:
+                    print(f"[GUI] detect non-taxable JSON パース失敗: {e}")
+
             self._send_json({
                 "success": True,
                 "uploadToken": timestamp,
                 "duplicates": duplicates,
+                "nonTaxableMismatches": non_taxable_mismatches,
             })
-            print(f"[GUI] upload-and-detect 完了: {len(duplicates)} 件の同名異コードを検出")
+            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 {len(non_taxable_mismatches)} 件")
 
         except Exception as e:
             import traceback
@@ -771,6 +813,7 @@ class Handler(BaseHTTPRequestHandler):
 
             upload_token = req.get("uploadToken", "").strip()
             dedup_choices = req.get("dedupChoices", {})
+            non_taxable_choices = req.get("nonTaxableChoices", {})
 
             if not upload_token:
                 self._send_json({"success": False, "error": "uploadToken が必要です"})
@@ -815,6 +858,11 @@ class Handler(BaseHTTPRequestHandler):
             with open(custom_json_path, "w", encoding="utf-8") as f:
                 json.dump(dedup_choices, f, ensure_ascii=False, indent=2)
 
+            # 非課税 custom JSON を一時ファイルに書き出し
+            nt_custom_json_path = upload_dir / "_non_taxable_choices.json"
+            with open(nt_custom_json_path, "w", encoding="utf-8") as f:
+                json.dump(non_taxable_choices, f, ensure_ascii=False, indent=2)
+
             # subprocess コマンド構築
             cmd = [
                 sys.executable,
@@ -835,7 +883,12 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--dedup-strategy", "custom"]
                 cmd += ["--dedup-custom-json", str(custom_json_path)]
 
-            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, choices={len(dedup_choices)}")
+            # 非課税 custom 選択がある場合は適用
+            if non_taxable_choices:
+                cmd += ["--non-taxable-mismatch-strategy", "custom"]
+                cmd += ["--non-taxable-mismatch-custom-json", str(nt_custom_json_path)]
+
+            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, dedup={len(dedup_choices)}, non_taxable={len(non_taxable_choices)}")
             print(f"[GUI] 実行: {' '.join(cmd)}")
 
             result = subprocess.run(
