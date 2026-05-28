@@ -341,9 +341,9 @@
             <div class="form-group">
               <label>非課税+税額矛盾の対処戦略</label>
               <select id="opt-non-taxable-strategy">
-                <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
+                <option value="warn-only">自動: 警告のみ (freee エラー継続、デフォルト)</option>
+                <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (税控除あり)</option>
                 <option value="zero-tax">自動: 税額を 0 に修正 (税区分維持、税控除なし)</option>
-                <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
                 <option value="interactive">対話: 1件ずつ選ぶ</option>
               </select>
               <small style="color:#666;">奉行原本で「非売上」なのに税額がある矛盾起票の対処。freee は「非課売上では税額を入力できません」エラーになるため対応が必要。（「非仕入」は「非対仕入10%」等に自動変換されるため対象外）</small>
@@ -521,6 +521,14 @@ const TAX_MAP = {
   "課売返|8":  "課税売返8%（軽）",
   "課売返|0":  "対象外",
   "課売返|":   "対象外",
+  "課仕返|10": "課対仕返10%",
+  "課仕返|8":  "課対仕返8%（軽）",
+  "課仕返|0":  "対象外",
+  "課仕返|":   "対象外",
+  "共仕返|10": "共対仕返10%",
+  "共仕返|8":  "共対仕返8%（軽）",
+  "共仕返|0":  "対象外",
+  "共仕返|":   "対象外",
   "非売上|10": "非課売上",
   "非売上|8":  "非課売上",
   "非売上|0":  "非課売上",
@@ -729,6 +737,8 @@ function obcRowToFreee(row, headerIdx, lineNo, errors) {
     crBumon, crAmount, crTaxCode, crTaxAmount, crTaxLabel, summary};
 }
 
+// freee 公式推奨の振替伝票形式 (片側空欄行) で変換する。
+// freee 公式 PDF「勘定科目『複合』でインポートすると年度締めができません」に準拠。
 function applyFukugo(rowsBySlip, groupBumon) {
   const result = [];
   let skipped = 0;
@@ -737,32 +747,31 @@ function applyFukugo(rowsBySlip, groupBumon) {
     const creditActive = (r.crKamoku !== '' && r.crAmount !== '0');
 
     if (debitActive && !creditActive) {
-      const bumon = r.drBumon || groupBumon;
+      // 借方のみ → 1行: 借方=実データ, 貸方フィールド全空欄
       const row = Object.assign({}, r);
-      row.crKamoku = '複合'; row.crHojo = ''; row.crBumon = bumon;
-      row.crTaxCode = '対象外'; row.crAmount = r.drAmount; row.crTaxAmount = '0';
+      row.crKamoku = ''; row.crHojo = ''; row.crBumon = '';
+      row.crTaxCode = ''; row.crAmount = ''; row.crTaxAmount = '';
       row.crPartner = ''; row.crPartnerCode = '';
       result.push(row);
     } else if (creditActive && !debitActive) {
-      const bumon = r.crBumon || groupBumon;
+      // 貸方のみ → 1行: 借方フィールド全空欄, 貸方=実データ
       const row = Object.assign({}, r);
-      row.drKamoku = '複合'; row.drHojo = ''; row.drBumon = bumon;
-      row.drTaxCode = '対象外'; row.drAmount = r.crAmount; row.drTaxAmount = '0';
+      row.drKamoku = ''; row.drHojo = ''; row.drBumon = '';
+      row.drTaxCode = ''; row.drAmount = ''; row.drTaxAmount = '';
       row.drPartner = ''; row.drPartnerCode = '';
       result.push(row);
     } else if (debitActive && creditActive) {
-      const bumonForCr = r.drBumon || groupBumon;
-      const bumonForDr = r.crBumon || groupBumon;
-      // 行1: 借方明細
+      // 両側有効 → 2行に分解 (各々の対側は全空欄)
+      // 行1: 借方明細 (貸方フィールド全空欄)
       const drRow = Object.assign({}, r);
-      drRow.crKamoku = '複合'; drRow.crHojo = ''; drRow.crBumon = bumonForCr;
-      drRow.crTaxCode = '対象外'; drRow.crAmount = r.drAmount; drRow.crTaxAmount = '0';
+      drRow.crKamoku = ''; drRow.crHojo = ''; drRow.crBumon = '';
+      drRow.crTaxCode = ''; drRow.crAmount = ''; drRow.crTaxAmount = '';
       drRow.crPartner = ''; drRow.crPartnerCode = '';
       result.push(drRow);
-      // 行2: 貸方明細
+      // 行2: 貸方明細 (借方フィールド全空欄)
       const crRow = Object.assign({}, r);
-      crRow.drKamoku = '複合'; crRow.drHojo = ''; crRow.drBumon = bumonForDr;
-      crRow.drTaxCode = '対象外'; crRow.drAmount = r.crAmount; crRow.drTaxAmount = '0';
+      crRow.drKamoku = ''; crRow.drHojo = ''; crRow.drBumon = '';
+      crRow.drTaxCode = ''; crRow.drAmount = ''; crRow.drTaxAmount = '';
       crRow.drPartner = ''; crRow.drPartnerCode = '';
       result.push(crRow);
     } else {
@@ -878,7 +887,20 @@ function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrate
   const allRows = [];
   const slipSizes = [];
   let totalSkipped = 0;
+  // 奉行入力側の伝票単位借貸集計 (変換前のデータで確認、Python の obc_mismatch_slips と対称)
+  const obcMismatchSlips = new Set();
   for (const [key, slipRows] of groups) {
+    // key は "date\tslipNo" 形式 (タブ区切り、line 1360 で生成)
+    const slipNo = typeof key === 'string' ? key.split('\t')[1] ?? key : String(key);
+    let drSum = 0, crSum = 0;
+    for (const r of slipRows) {
+      const d = parseInt(String(r.drAmount ?? '').trim() || '0', 10);
+      const c = parseInt(String(r.crAmount ?? '').trim() || '0', 10);
+      if (!isNaN(d)) drSum += d;
+      if (!isNaN(c)) crSum += c;
+    }
+    if (drSum !== crSum) obcMismatchSlips.add(slipNo);
+
     const groupBumon = findGroupBumon(slipRows);
     const {result, skipped} = applyFukugo(slipRows, groupBumon);
     totalSkipped += skipped;
@@ -886,7 +908,7 @@ function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrate
     allRows.push(...freeeRows);
     slipSizes.push([key, freeeRows.length]);
   }
-  return {allRows, slipSizes, totalSkipped};
+  return {allRows, slipSizes, totalSkipped, obcMismatchSlips};
 }
 
 function checkSlipBalance(allRows, knownMismatchSlips) {
@@ -931,7 +953,7 @@ function auditObcSource(allGroups, dateFrom, dateTo) {
       slipDate.set(slipKey, dateStr);
 
       // 課売上+マイナス: obcRowToFreee が保持する元の taxLabel (drTaxLabel/crTaxLabel) で判定
-      // drTaxCode は applyFukugo 後に「複合」行で '対象外' に上書きされるため使用不可
+      // drTaxCode は applyFukugo 後に片側空欄行で '' に上書きされるため使用不可
       if (r.drTaxLabel === '課売上' && parseInt(r.drAmount||'0') < 0) {
         minusKaubai.push({slipNo: r.slipNo, date: dateStr, side: '借方', amount: parseInt(r.drAmount), summary: r.summary});
       }
@@ -1388,7 +1410,7 @@ async function executeConversion() {
 
     // グループ処理 (非課税戦略も適用)
     const nonTaxableResultsCollector = [];
-    const {allRows, slipSizes, totalSkipped} = processGroups(
+    const {allRows, slipSizes, totalSkipped, obcMismatchSlips} = processGroups(
       allGroups,
       Object.keys(codeRewriteMap).length ? codeRewriteMap : null,
       Object.keys(nameOverrideMap).length ? nameOverrideMap : null,
@@ -1397,8 +1419,9 @@ async function executeConversion() {
       nonTaxableResultsCollector
     );
 
-    // 借貸整合性チェック
-    const balanceResult = checkSlipBalance(allRows, opts.knownMismatches);
+    // 借貸整合性チェック (奉行原本側不一致伝票を既知不一致に統合して誤検出を排除)
+    const effectiveKnownMismatches = new Set([...(opts.knownMismatches || []), ...obcMismatchSlips]);
+    const balanceResult = checkSlipBalance(allRows, effectiveKnownMismatches);
     errors.balance = balanceResult.unknown;
 
     // 奉行原本監査
@@ -1472,7 +1495,7 @@ function getOptions() {
     outputPartners: document.getElementById('opt-output-partners').checked,
     partnersPrefix: document.getElementById('opt-partners-prefix').value || 'freee取引先マスタ',
     dedupStrategy: document.getElementById('opt-dedup-strategy').value,
-    nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'change-to-taxable'}).value,
+    nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'warn-only'}).value,
     nonTaxableCustom: null,  // モーダル UI が実装されたら設定される
     knownMismatches,
   };
@@ -1606,7 +1629,7 @@ function detectNonTaxableFromGroups(allGroups) {
   for (const [key, rows] of allGroups) {
     for (const r of rows) {
       // 借方 (非売上のみ対象: 非仕入は TAX_MAP で 非対仕入10% 等に自動変換されるため対象外)
-      if (r.drTaxLabel === '非売上' && parseInt(String(r.drTaxAmount||'0'), 10) !== 0) {
+      if (r.drTaxLabel && r.drTaxLabel === '非売上' && parseInt(String(r.drTaxAmount||'0'), 10) !== 0) {
         results.push({
           slip_no: r.slipNo, date: r.date, side: '借方',
           tax_label: r.drTaxLabel,
@@ -2292,7 +2315,7 @@ function saveSettings() {
       outputPartners: document.getElementById('opt-output-partners').checked,
       partnersPrefix: document.getElementById('opt-partners-prefix').value,
       dedupStrategy: document.getElementById('opt-dedup-strategy').value,
-      nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'change-to-taxable'}).value,
+      nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'warn-only'}).value,
       knownMismatches: document.getElementById('opt-known-mismatches').value,
     }));
   } catch(e) {}

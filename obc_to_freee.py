@@ -136,6 +136,16 @@ TAX_MAP = {
     ("課売返", "8"):  "課税売返8%（軽）",
     ("課売返", "0"):  "対象外",
     ("課売返", ""):   "対象外",
+    # 課税仕入返品 (仕入返品・値引き)
+    ("課仕返", "10"): "課対仕返10%",
+    ("課仕返", "8"):  "課対仕返8%（軽）",
+    ("課仕返", "0"):  "対象外",
+    ("課仕返", ""):   "対象外",
+    # 共通仕入返品
+    ("共仕返", "10"): "共対仕返10%",
+    ("共仕返", "8"):  "共対仕返8%（軽）",
+    ("共仕返", "0"):  "対象外",
+    ("共仕返", ""):   "対象外",
     # 非課税
     ("非売上", "10"): "非課売上",
     ("非売上", "8"):  "非課売上",
@@ -698,25 +708,26 @@ def obc_row_to_freee(row: list, header_idx: dict, line_no: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Transformation 1: 「複合」補完 (行分解版)
+# Transformation 1: 振替伝票形式変換 (片側空欄行)
 # ---------------------------------------------------------------------------
 
 def apply_fukugo(rows_by_slip: list, group_bumon: str) -> list:
     """
-    同一伝票グループのrows_by_slipに対して「行分解」ロジックを適用し、
+    同一伝票グループのrows_by_slipに対して「振替伝票形式」変換ロジックを適用し、
     変換済みリストを返す。
 
-    奉行の1明細行は借方部分・貸方部分の有効性に応じて以下に分解する:
-      - 借方のみ有効: 1行 (借方=実データ, 貸方=複合)
-      - 貸方のみ有効: 1行 (借方=複合, 貸方=実データ)
-      - 両側有効    : 2行 (借方明細行 + 貸方明細行)
+    freee 公式 PDF「勘定科目『複合』でインポートすると年度締めができません。
+    『諸口』などを用いてください」に準拠し、片側空欄形式で出力する。
+
+    奉行の1明細行は借方部分・貸方部分の有効性に応じて以下に変換する:
+      - 借方のみ有効: 1行 (借方=実データ, 貸方フィールド全空欄)
+      - 貸方のみ有効: 1行 (借方フィールド全空欄, 貸方=実データ)
+      - 両側有効    : 2行 (借方明細行 + 貸方明細行、各々の対側は全空欄)
       - 両側無効    : スキップ (警告ログ)
 
-    「複合」行の値:
-      - 勘定科目=複合, 補助科目=空, 取引先=空, 取引先コード=空
-      - 部門=反対側部門 (なければ group_bumon)
-      - 税区分=対象外, 税額=0
-      - 金額=実データ側と同額
+    片側空欄行の値:
+      - 勘定科目=空, 補助科目=空, 取引先=空, 取引先コード=空
+      - 部門=空, 税区分=空, 税額=0, 金額=0
     """
     result = []
     for r in rows_by_slip:
@@ -724,58 +735,54 @@ def apply_fukugo(rows_by_slip: list, group_bumon: str) -> list:
         credit_active = (r["cr_kamoku"] != "" and r["cr_amount"] != "0")
 
         if debit_active and not credit_active:
-            # 借方のみ → 1行: 借方=実データ, 貸方=複合
-            bumon = r["dr_bumon"] if r["dr_bumon"] else group_bumon
+            # 借方のみ → 1行: 借方=実データ, 貸方フィールド全空欄
             row = dict(r)
-            row["cr_kamoku"] = "複合"
+            row["cr_kamoku"] = ""
             row["cr_hojo"] = ""
-            row["cr_bumon"] = bumon
-            row["cr_tax_code"] = "対象外"
-            row["cr_amount"] = r["dr_amount"]
-            row["cr_tax_amount"] = "0"
+            row["cr_bumon"] = ""
+            row["cr_tax_code"] = ""
+            row["cr_amount"] = ""
+            row["cr_tax_amount"] = ""
             row["cr_partner"] = ""
             row["cr_partner_code"] = ""
             result.append(row)
 
         elif credit_active and not debit_active:
-            # 貸方のみ → 1行: 借方=複合, 貸方=実データ
-            bumon = r["cr_bumon"] if r["cr_bumon"] else group_bumon
+            # 貸方のみ → 1行: 借方フィールド全空欄, 貸方=実データ
             row = dict(r)
-            row["dr_kamoku"] = "複合"
+            row["dr_kamoku"] = ""
             row["dr_hojo"] = ""
-            row["dr_bumon"] = bumon
-            row["dr_tax_code"] = "対象外"
-            row["dr_amount"] = r["cr_amount"]
-            row["dr_tax_amount"] = "0"
+            row["dr_bumon"] = ""
+            row["dr_tax_code"] = ""
+            row["dr_amount"] = ""
+            row["dr_tax_amount"] = ""
             row["dr_partner"] = ""
             row["dr_partner_code"] = ""
             result.append(row)
 
         elif debit_active and credit_active:
-            # 両側有効 → 2行に分解
-            bumon_for_cr_side = r["dr_bumon"] if r["dr_bumon"] else group_bumon
-            bumon_for_dr_side = r["cr_bumon"] if r["cr_bumon"] else group_bumon
+            # 両側有効 → 2行に分解 (各々の対側は全空欄)
 
-            # 行1: 借方=実データ, 貸方=複合 (借方明細)
+            # 行1: 借方=実データ, 貸方フィールド全空欄 (借方明細)
             dr_row = dict(r)
-            dr_row["cr_kamoku"] = "複合"
+            dr_row["cr_kamoku"] = ""
             dr_row["cr_hojo"] = ""
-            dr_row["cr_bumon"] = bumon_for_cr_side
-            dr_row["cr_tax_code"] = "対象外"
-            dr_row["cr_amount"] = r["dr_amount"]
-            dr_row["cr_tax_amount"] = "0"
+            dr_row["cr_bumon"] = ""
+            dr_row["cr_tax_code"] = ""
+            dr_row["cr_amount"] = ""
+            dr_row["cr_tax_amount"] = ""
             dr_row["cr_partner"] = ""
             dr_row["cr_partner_code"] = ""
             result.append(dr_row)
 
-            # 行2: 借方=複合, 貸方=実データ (貸方明細)
+            # 行2: 借方フィールド全空欄, 貸方=実データ (貸方明細)
             cr_row = dict(r)
-            cr_row["dr_kamoku"] = "複合"
+            cr_row["dr_kamoku"] = ""
             cr_row["dr_hojo"] = ""
-            cr_row["dr_bumon"] = bumon_for_dr_side
-            cr_row["dr_tax_code"] = "対象外"
-            cr_row["dr_amount"] = r["cr_amount"]
-            cr_row["dr_tax_amount"] = "0"
+            cr_row["dr_bumon"] = ""
+            cr_row["dr_tax_code"] = ""
+            cr_row["dr_amount"] = ""
+            cr_row["dr_tax_amount"] = ""
             cr_row["dr_partner"] = ""
             cr_row["dr_partner_code"] = ""
             result.append(cr_row)
@@ -1095,19 +1102,46 @@ def process_groups(groups: OrderedDict,
                    non_taxable_strategy: str = "warn-only",
                    non_taxable_custom: dict = None) -> tuple:
     """
-    全グループに複合補完を適用し、(freee33列の行リスト, グループ別行数リスト) を返す。
+    全グループに振替伝票形式変換を適用し、
+    (freee33列の行リスト, グループ別行数リスト, 非課税結果, 奉行側不一致伝票番号セット) を返す。
+
     グループ別行数リストは [(key, freee行数), ...] の順序付きリスト。
     行分解により1奉行行が2freee行になる場合があるため、
     実際の出力行数を正確に計算する。
 
     code_rewrite_map / name_override_map が指定された場合は to_freee_row() で適用する。
     non_taxable_strategy / non_taxable_custom: 非課税矛盾の対処 (to_freee_row 参照)。
+
+    奉行側不一致伝票番号セット: 振替伝票形式では片側空欄行があるため freee 出力行ベースの
+    借貸チェックでは必ず不一致になる。奉行入力グループで計算した借貸不一致伝票番号を返すことで
+    check_slip_balance に「元々不一致の伝票を既知として除外」させる。
     """
     all_rows = []
     slip_sizes = []
     total_skipped = 0
     nontax_results = []
+    # 奉行入力側の伝票単位借貸集計 (変換前のデータで確認)
+    obc_mismatch_slips: set = set()
+    obc_slip_dr: dict = {}
+    obc_slip_cr: dict = {}
     for key, slip_rows in groups.items():
+        slip_no = key[1] if isinstance(key, tuple) and len(key) >= 2 else str(key)
+        dr_sum = 0
+        cr_sum = 0
+        for r in slip_rows:
+            try:
+                dr_sum += int(str(r.get("dr_amount", "0")).strip() or "0")
+            except (ValueError, TypeError):
+                pass
+            try:
+                cr_sum += int(str(r.get("cr_amount", "0")).strip() or "0")
+            except (ValueError, TypeError):
+                pass
+        obc_slip_dr[slip_no] = dr_sum
+        obc_slip_cr[slip_no] = cr_sum
+        if dr_sum != cr_sum:
+            obc_mismatch_slips.add(slip_no)
+
         group_bumon = find_group_bumon(slip_rows)
         completed, skipped = apply_fukugo(slip_rows, group_bumon)
         total_skipped += skipped
@@ -1126,7 +1160,7 @@ def process_groups(groups: OrderedDict,
             f"WARN: 借方・貸方ともに空の行 (奉行の空パディング行) を合計 {total_skipped} 件スキップ",
             file=sys.stderr,
         )
-    return all_rows, slip_sizes, nontax_results
+    return all_rows, slip_sizes, nontax_results, obc_mismatch_slips
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1220,7 @@ def check_slip_balance(all_rows: list, label: str = "",
     prefix = f"[{label}] " if label else ""
 
     if known_mismatches:
-        print(f"{prefix}既知不一致 (--known-balance-mismatches 指定) ({len(known_mismatches)} 件):", file=sys.stderr)
+        print(f"{prefix}奉行原本由来の借貸不一致 (振替伝票形式のため正常) ({len(known_mismatches)} 件):", file=sys.stderr)
         for date_str, slip_no, dr, cr in known_mismatches:
             print(f"  WARN: 伝票 {slip_no} 日付 {date_str} 借方合計 {dr} 貸方合計 {cr} 差 {dr - cr}", file=sys.stderr)
 
@@ -2397,7 +2431,7 @@ def main():
 
     # 全グループ変換 (process_groups は (all_rows, slip_sizes, nontax_results) を返す)
     # dedup 後の code_rewrite_map / name_override_map を仕訳行に反映する
-    all_rows, slip_sizes, nontax_results = process_groups(
+    all_rows, slip_sizes, nontax_results, obc_mismatch_slips = process_groups(
         all_groups,
         code_rewrite_map=code_rewrite_map if code_rewrite_map else None,
         name_override_map=name_override_map if name_override_map else None,
@@ -2407,11 +2441,15 @@ def main():
     print(f"出力行数: {len(all_rows)}")
 
     # 伝票単位借貸整合性チェック (ファイル書き出し前)
+    # 振替伝票形式では片側空欄行があるため freee 出力行ベースの借貸チェックは
+    # 奉行原本の不一致伝票を「変換バグ」と誤検出する。奉行入力側で不一致だった
+    # 伝票番号を既知不一致として除外して変換バグのみを検出する。
     # 未知の不一致は check_slip_balance 内で _errors.add_balance() に追加される。
     # 終了コード判定は後段の _errors.has_critical() で一元管理するため、戻り値は受けない。
+    effective_known = known_mismatch_slips | obc_mismatch_slips
     print()
     check_slip_balance(all_rows, label=args.output_prefix,
-                       known_mismatch_slips=known_mismatch_slips)
+                       known_mismatch_slips=effective_known)
     print()
 
     # 出力 (balance NG でも出力はスキップせず、サマリで警告)
