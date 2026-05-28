@@ -1181,11 +1181,11 @@ function applyDedupStrategy(partnerData, strategy, customChoices) {
       for (const old of eliminated) { codeRewriteMap[old] = adoptedCode; partners.delete(old); }
       nameOverrideMap[adoptedCode] = name;
       const replacedTotal = eliminated.reduce((s,c) => s+usage[c].total, 0);
-      auditLog.push({name, oldCodes, action:`コード ${adoptedCode} に統合 (${strategy})`, result:`仕訳の ${eliminated.join(' / ')} → ${adoptedCode} に置換 (${replacedTotal} 件)`});
+      auditLog.push({name, oldCodes, usage, action:`コード ${adoptedCode} に統合 (${strategy})`, result:`仕訳の ${eliminated.join(' / ')} → ${adoptedCode} に置換 (${replacedTotal} 件)`});
 
     } else if (strategy === 'suffix') {
       applySuffix(name, codes, usage, partners, nameOverrideMap);
-      auditLog.push({name, oldCodes, action:'別名化 (suffix)', result:`マスタに ${codes.length} 行`});
+      auditLog.push({name, oldCodes, usage, action:'別名化 (suffix)', result:`マスタに ${codes.length} 行`});
 
     } else if (strategy === 'custom') {
       const ch = (customChoices||{})[name] || {action:'merge-most-used'};
@@ -1196,13 +1196,13 @@ function applyDedupStrategy(partnerData, strategy, customChoices) {
         for (const old of eliminated) { codeRewriteMap[old] = targetCode; partners.delete(old); }
         nameOverrideMap[targetCode] = name;
         const replacedTotal = eliminated.reduce((s,c) => s+usage[c].total, 0);
-        auditLog.push({name, oldCodes, action:`コード ${targetCode} に統合 (custom)`, result:`${eliminated.join(' / ')} → ${targetCode} (${replacedTotal} 件)`});
+        auditLog.push({name, oldCodes, usage, action:`コード ${targetCode} に統合 (custom)`, result:`${eliminated.join(' / ')} → ${targetCode} (${replacedTotal} 件)`});
       } else if (ch.action === 'rename') {
         applySuffix(name, codes, usage, partners, nameOverrideMap);
-        auditLog.push({name, oldCodes, action:'別名化 (custom)', result:`マスタに ${codes.length} 行`});
+        auditLog.push({name, oldCodes, usage, action:'別名化 (custom)', result:`マスタに ${codes.length} 行`});
       } else if (ch.action === 'skip') {
         for (const code of codes) partners.delete(code);
-        auditLog.push({name, oldCodes, action:'スキップ (custom)', result:'マスタから除外'});
+        auditLog.push({name, oldCodes, usage, action:'スキップ (custom)', result:'マスタから除外'});
       }
     }
   }
@@ -2381,21 +2381,6 @@ function renderResult(r) {
   // 監査ログ
   const auditHTML = renderAuditSections(r);
 
-  // dedup 結果
-  const dedupHTML = r.dedupAuditLog && r.dedupAuditLog.length > 0 ? `
-    <div class="card">
-      <div class="card-title">同名異コード対処結果</div>
-      <table class="audit-table">
-        <thead><tr><th>取引先名</th><th>元コード</th><th>対処</th><th>結果</th></tr></thead>
-        <tbody>${r.dedupAuditLog.map(e => `<tr>
-          <td>${escHtml(e.name)}</td>
-          <td>${escHtml(e.oldCodes.join(' / '))}</td>
-          <td>${escHtml(e.action)}</td>
-          <td>${escHtml(e.result)}</td>
-        </tr>`).join('')}</tbody>
-      </table>
-    </div>` : '';
-
   // freee手順 (折りたたみ)
   const howtoHTML = `
     <div class="audit-section expanded">
@@ -2427,13 +2412,18 @@ function renderResult(r) {
       <div id="preview-tab-contents">${previewContents}</div>
     </div>
     ${auditHTML}
-    ${dedupHTML}
+    <div id="dedup-result-section-anchor"></div>
     <div id="kauuri-rebate-result-section-anchor"></div>
     <div id="nontax-result-section-anchor"></div>
     ${howtoHTML}`;
 
   // 初期タブのテーブルを描画
   renderPreviewTable(0, r.outputFiles[0].rows);
+
+  // 同名異コード対処結果セクション
+  if (r.dedupAuditLog && r.dedupAuditLog.length > 0) {
+    renderDedupResultsSection(r.dedupAuditLog, r.outputFiles);
+  }
 
   // 課売返対処結果セクション
   if (r.kauuriRebateLog && r.kauuriRebateLog.length > 0) {
@@ -2758,6 +2748,191 @@ function renderNonTaxableResultsSection(results, outputFiles) {
   } else {
     document.getElementById('result-content').appendChild(section);
   }
+}
+
+// ===========================================================================
+// 同名異コード対処結果セクション (Step3)
+// ===========================================================================
+
+function renderDedupResultsSection(dedupAuditLog, outputFiles) {
+  const existing = document.getElementById('dedup-result-section');
+  if (existing) existing.remove();
+  if (!dedupAuditLog || dedupAuditLog.length === 0) return;
+
+  const firstFile = outputFiles && outputFiles.length > 0 ? outputFiles[0].name : '';
+  const baseName = firstFile.replace(/\.[^.]+$/, '') || '変換結果';
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const csvFilename = `同名異コード対処結果_${baseName}_${today}.csv`;
+
+  const section = document.createElement('div');
+  section.id = 'dedup-result-section';
+  section.className = 'card';
+  section.style.cssText = 'margin-bottom:16px;';
+
+  // ヘッダー行
+  const titleRow = document.createElement('div');
+  titleRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+  titleRow.innerHTML = `
+    <span style="font-weight:700;font-size:14px;">同名異コード対処結果</span>
+    <span class="badge" style="background:#dbeafe;color:#1d4ed8;font-size:12px;padding:2px 8px;border-radius:4px;">${dedupAuditLog.length} 件</span>`;
+
+  // ボタン行
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+
+  const btnDl = document.createElement('button');
+  btnDl.className = 'btn btn-success btn-sm';
+  btnDl.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnDl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </svg>CSVダウンロード`;
+  btnDl.addEventListener('click', () => {
+    const csvContent = buildDedupResultCsv(dedupAuditLog);
+    const bom = '﻿';
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn btn-secondary btn-sm';
+  btnCopy.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnCopy.textContent = 'テキストエリアを開く / 閉じる';
+  let taVisible = false;
+  const ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.rows = 8;
+  ta.style.cssText = 'width:100%;font-size:12px;font-family:monospace;margin-bottom:12px;display:none;resize:vertical;';
+  ta.value = buildDedupResultTabText(dedupAuditLog);
+  btnCopy.addEventListener('click', () => {
+    taVisible = !taVisible;
+    ta.style.display = taVisible ? 'block' : 'none';
+    if (taVisible) ta.select();
+  });
+
+  btnRow.appendChild(btnDl);
+  btnRow.appendChild(btnCopy);
+
+  // 詳細テーブル
+  const table = document.createElement('table');
+  table.className = 'audit-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>取引先名</th><th>統合方針</th><th>借方件数</th><th>貸方件数</th><th>合計件数</th>
+      <th>該当全コード</th><th>結果</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  dedupAuditLog.forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escHtml(entry.name || '')}</td>
+      <td>${escHtml(entry.action || '')}</td>
+      <td style="text-align:right">${totalDr > 0 || totalAll > 0 ? totalDr : ''}</td>
+      <td style="text-align:right">${totalCr > 0 || totalAll > 0 ? totalCr : ''}</td>
+      <td style="text-align:right">${totalAll > 0 ? totalAll : ''}</td>
+      <td style="font-size:12px">${escHtml(codesStr)}</td>
+      <td>${escHtml(entry.result || '')}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  section.appendChild(titleRow);
+  section.appendChild(btnRow);
+  section.appendChild(ta);
+  section.appendChild(table);
+
+  const anchor = document.getElementById('dedup-result-section-anchor');
+  if (anchor) {
+    anchor.parentNode.insertBefore(section, anchor);
+  } else {
+    document.getElementById('result-content').appendChild(section);
+  }
+}
+
+function buildDedupResultCsv(dedupAuditLog) {
+  const headers = ['取引先名', '統合方針', '借方件数', '貸方件数', '合計件数', '該当全コード', '結果'];
+  const lines = [headers.join(',')];
+  (dedupAuditLog || []).forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
+    const cells = [
+      entry.name    || '',
+      entry.action  || '',
+      totalDr  > 0 || totalAll > 0 ? String(totalDr)  : '',
+      totalCr  > 0 || totalAll > 0 ? String(totalCr)  : '',
+      totalAll > 0 ? String(totalAll) : '',
+      codesStr,
+      entry.result  || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildDedupResultTabText(dedupAuditLog) {
+  const headers = ['取引先名', '統合方針', '借方件数', '貸方件数', '合計件数', '該当全コード', '結果'];
+  const lines = [headers.join('\t')];
+  (dedupAuditLog || []).forEach(entry => {
+    const usage = entry.usage || {};
+    const oldCodes = entry.oldCodes || [];
+    let totalDr = 0, totalCr = 0, totalAll = 0;
+    if (Object.keys(usage).length > 0) {
+      oldCodes.forEach(c => {
+        const u = usage[c] || {};
+        totalDr  += u.dr    || 0;
+        totalCr  += u.cr    || 0;
+        totalAll += u.total || 0;
+      });
+    }
+    const codesStr = oldCodes.map(c => {
+      const u = usage[c];
+      return u ? `${c}(${u.total}件)` : c;
+    }).join('; ');
+    lines.push([
+      entry.name    || '',
+      entry.action  || '',
+      totalDr  > 0 || totalAll > 0 ? String(totalDr)  : '',
+      totalCr  > 0 || totalAll > 0 ? String(totalCr)  : '',
+      totalAll > 0 ? String(totalAll) : '',
+      codesStr,
+      entry.result  || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
 }
 
 function buildNonTaxableCsv(results) {

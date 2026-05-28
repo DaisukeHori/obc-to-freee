@@ -250,38 +250,67 @@ def extract_slip_details(stderr: str) -> dict:
 def extract_dedup_audit(stderr: str) -> list:
     """
     stderr から [同名異コード対処結果] セクションを抽出してリストで返す。
-    各エントリ: {"name": str, "oldCodes": [str], "action": str, "result": str}
+    各エントリ:
+      {
+        "name": str,
+        "oldCodes": [str],
+        "action": str,
+        "result": str,
+        "usage": {code: {"dr": int, "cr": int, "total": int}}
+      }
     """
+    import re
     entries = []
     lines = stderr.splitlines()
     in_dedup = False
+    header_sep_seen = False  # [同名異コード対処結果] 直後の === 区切りをスキップするフラグ
     current = None
 
     for line in lines:
         stripped = line.strip()
         if "[同名異コード対処結果]" in stripped:
             in_dedup = True
+            header_sep_seen = False
             continue
         if not in_dedup:
             continue
-        # セクション終端
-        if stripped.startswith("===") and in_dedup:
+        # [同名異コード対処結果] 直後の === 区切り行はヘッダー下部区切り → スキップ
+        if stripped.startswith("===") and not header_sep_seen:
+            header_sep_seen = True
+            continue
+        # 2 番目以降の === 区切りはセクション終端
+        if stripped.startswith("==="):
             if current:
                 entries.append(current)
                 current = None
             in_dedup = False
+            header_sep_seen = False
             continue
-        # 取引先名行 (末尾 ":")
-        if stripped.endswith(":") and not stripped.startswith("元:") and not stripped.startswith("選択:") and not stripped.startswith("結果:"):
+        # 取引先名行 (末尾 ":" で、既知プレフィックスでない行)
+        if (stripped.endswith(":")
+                and not stripped.startswith("元:")
+                and not stripped.startswith("選択:")
+                and not stripped.startswith("結果:")
+                and not stripped.startswith("使用件数:")):
             if current:
                 entries.append(current)
-            current = {"name": stripped[:-1], "oldCodes": [], "action": "", "result": ""}
+            current = {"name": stripped[:-1], "oldCodes": [], "action": "", "result": "", "usage": {}}
         elif current and stripped.startswith("元:"):
             # 元: コード XXX / YYY
             codes_part = stripped[len("元:"):].strip()
             if codes_part.startswith("コード "):
                 codes_part = codes_part[len("コード "):]
             current["oldCodes"] = [c.strip() for c in codes_part.split("/")]
+        elif current and stripped.startswith("使用件数:"):
+            # 使用件数: コード=XXXX 借方=N 貸方=N 合計=N
+            m = re.search(r"コード=(\S+)\s+借方=(\d+)\s+貸方=(\d+)\s+合計=(\d+)", stripped)
+            if m:
+                code = m.group(1)
+                current["usage"][code] = {
+                    "dr": int(m.group(2)),
+                    "cr": int(m.group(3)),
+                    "total": int(m.group(4)),
+                }
         elif current and stripped.startswith("選択:"):
             current["action"] = stripped[len("選択:"):].strip()
         elif current and stripped.startswith("結果:"):
