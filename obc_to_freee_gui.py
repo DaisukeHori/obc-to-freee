@@ -114,28 +114,65 @@ def save_settings(data: dict):
 
 def extract_audit_sections(stderr: str) -> dict:
     """
-    stderr から [要確認 X] セクションを抽出して dict で返す。
+    audit_obc_source() の stderr 出力を抽出して dict で返す。
+
+    責務と設計上の注意:
+      - [要確認 1/3] / [要確認 2/3] / [要確認 3/3] / [業務確認用] は
+        audit_obc_source() が出力するセクションで、この関数が主担当として抽出する。
+      - [要確認 取引先マスタ A] / [要確認 取引先マスタ B] は
+        print_partner_warnings() が出力するセクションであり、別関数が責任を持つ。
+        ただし stderr を一括パースする利便性から、同じパーサーで抽出している。
+
     各セクションは次の === 行 (または文末) まで。
+
+    件数カウント対象はリストエントリ行のみ取り込む。
+    説明文・注記・「変換処理は正常完了しました」等のフリーテキスト行は除外する。
+
+    各セクションのエントリ行パターン:
+      balanceWarnings / negativeWarnings / nonTaxableSalesWarnings / businessReview:
+        "  No. ..." 形式 (先頭に "No. " を含む)
+      auditA:
+        "  コード ..." 形式 (先頭に "コード " を含む)
+      auditB:
+        "  名前 ..." 形式 (先頭に "名前 '" を含む)
     """
     result = {
         "auditA": [],
         "auditB": [],
         "balanceWarnings": [],
         "negativeWarnings": [],
+        "nonTaxableSalesWarnings": [],
+        "businessReview": [],
     }
 
     section_map = {
-        "[要確認 1/2]": "balanceWarnings",
-        "[要確認 2/2]": "negativeWarnings",
+        "[要確認 1/3]": "balanceWarnings",
+        "[要確認 2/3]": "negativeWarnings",
+        "[要確認 3/3]": "nonTaxableSalesWarnings",
+        "[業務確認用]": "businessReview",
         "[要確認 取引先マスタ A]": "auditA",
         "[要確認 取引先マスタ B]": "auditB",
     }
+
+    # セクション別のエントリ行判定関数
+    # stripped (strip済み) に対して適用する
+    def _is_entry_line(key: str, stripped: str) -> bool:
+        if key in ("balanceWarnings", "negativeWarnings", "nonTaxableSalesWarnings", "businessReview"):
+            # "  No. {slip_no} ..." → strip後は "No. " で始まる
+            return stripped.startswith("No. ")
+        if key == "auditA":
+            # "  コード {code}: ..." → strip後は "コード " で始まる
+            return stripped.startswith("コード ")
+        if key == "auditB":
+            # "  名前 '{name}': ..." → strip後は "名前 '" で始まる
+            return stripped.startswith("名前 '")
+        return False
 
     lines = stderr.splitlines()
     current_key = None
     for line in lines:
         stripped = line.strip()
-        # セクション開始チェック
+        # セクション開始チェック: マーカーが含まれる行でキーを設定
         matched = False
         for marker, key in section_map.items():
             if marker in stripped:
@@ -144,12 +181,11 @@ def extract_audit_sections(stderr: str) -> dict:
                 break
         if matched:
             continue
-        # セクション区切り (===) → リセット
+        # === 行はヘッダー装飾 or セクション末尾装飾なのでスキップ (リセットしない)
         if stripped.startswith("==="):
-            current_key = None
             continue
-        # 内容行
-        if current_key and stripped:
+        # エントリ行のみ取り込む (説明文・注記・サマリ行は除外)
+        if current_key and stripped and _is_entry_line(current_key, stripped):
             result[current_key].append(stripped)
 
     return result
@@ -158,6 +194,24 @@ def extract_audit_sections(stderr: str) -> dict:
 # ---------------------------------------------------------------------------
 # dedup 監査ログ抽出
 # ---------------------------------------------------------------------------
+
+def extract_non_taxable_results(stderr: str) -> list:
+    """
+    stderr から NONTAX_RESULTS_JSON: 行を抽出して list で返す。
+    obc_to_freee.py が非課税対処を行った行の結果を JSON として出力する行。
+    フォーマット: NONTAX_RESULTS_JSON:[{...}, ...]
+    """
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("NONTAX_RESULTS_JSON:"):
+            json_part = stripped[len("NONTAX_RESULTS_JSON:"):]
+            try:
+                return json.loads(json_part)
+            except Exception as e:
+                print(f"[GUI] NONTAX_RESULTS_JSON パース失敗: {e}")
+                return []
+    return []
+
 
 def extract_dedup_audit(stderr: str) -> list:
     """
@@ -262,6 +316,8 @@ def build_summary(outputs: list, audit: dict) -> dict:
         "auditB": audit.get("auditB", []),
         "balanceWarnings": audit.get("balanceWarnings", []),
         "negativeWarnings": audit.get("negativeWarnings", []),
+        "nonTaxableSalesWarnings": audit.get("nonTaxableSalesWarnings", []),
+        "businessReview":          audit.get("businessReview", []),
     }
 
 
@@ -581,6 +637,13 @@ class Handler(BaseHTTPRequestHandler):
                     cmd += ["--dedup-strategy", dedup_strategy]
 
             # 非課税+税額矛盾の戦略 (warn-only/zero-tax/change-to-taxable のみ受け付け、interactive/custom は別フローで)
+            # custom が通常フロー (/api/convert) に来た場合は 400 で弾く (防御的ガード)
+            if non_taxable_strategy == "custom":
+                self._send_json(
+                    {"success": False, "error": "custom 戦略は /api/upload-and-detect + /api/convert-with-choices フローでのみ使用してください"},
+                    status=400,
+                )
+                return
             valid_nt_strategies = {"warn-only", "zero-tax", "change-to-taxable"}
             if non_taxable_strategy in valid_nt_strategies and non_taxable_strategy != "warn-only":
                 cmd += ["--non-taxable-mismatch-strategy", non_taxable_strategy]
@@ -602,6 +665,9 @@ class Handler(BaseHTTPRequestHandler):
             # dedup 監査ログ抽出
             dedup_audit = extract_dedup_audit(result.stderr)
 
+            # 非課税対処結果抽出
+            non_taxable_results = extract_non_taxable_results(result.stderr)
+
             # 出力ファイル収集
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
@@ -617,6 +683,7 @@ class Handler(BaseHTTPRequestHandler):
                 "outputs": outputs,
                 "summary": summary,
                 "dedupAudit": dedup_audit,
+                "nonTaxableResults": non_taxable_results,
             }
 
             # 失敗時でも詳細情報を付与
@@ -788,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                 "duplicates": duplicates,
                 "nonTaxableMismatches": non_taxable_mismatches,
             })
-            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 {len(non_taxable_mismatches)} 件")
+            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 (非売上のみ) {len(non_taxable_mismatches)} 件")
 
         except Exception as e:
             import traceback
@@ -911,6 +978,9 @@ class Handler(BaseHTTPRequestHandler):
             # dedup 監査ログ抽出 (stderr から)
             dedup_audit = extract_dedup_audit(result.stderr)
 
+            # 非課税対処結果抽出
+            non_taxable_results = extract_non_taxable_results(result.stderr)
+
             # 出力ファイル収集
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
@@ -926,6 +996,7 @@ class Handler(BaseHTTPRequestHandler):
                 "outputs": outputs,
                 "summary": summary,
                 "dedupAudit": dedup_audit,
+                "nonTaxableResults": non_taxable_results,
             }
 
             if result.returncode != 0:

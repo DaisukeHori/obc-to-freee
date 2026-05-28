@@ -86,7 +86,6 @@
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
   .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
   .checkbox-row label { font-size: 13px; cursor: pointer; }
-  .partner-options { padding: 16px; background: var(--blue-light); border-radius: 6px; margin-top: 8px; }
 
   /* Buttons */
   .btn { padding: 9px 20px; border: none; border-radius: 6px; font-size: 13px;
@@ -230,6 +229,12 @@
     border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* Options group box (青枠ラッパー) */
+  .options-group-box { background: #eff6ff; border: 1px solid #dbeafe; border-radius: 8px;
+    padding: 16px; margin-top: 12px; }
+  .options-group-box .form-group { margin-bottom: 12px; }
+  .options-group-box .form-group:last-child { margin-bottom: 0; }
+
   /* Responsive */
   @media (max-width: 768px) {
     .sidebar { display: none; }
@@ -316,26 +321,24 @@
             <input type="checkbox" id="opt-output-partners" onchange="togglePartnerOptions()">
             <label for="opt-output-partners">取引先マスタCSVも生成する</label>
           </div>
-          <div id="partner-options" class="partner-options" style="display:none;">
-            <div class="form-row">
-              <div class="form-group">
-                <label>取引先マスタ ファイル名プレフィックス</label>
-                <input type="text" id="opt-partners-prefix" value="freee取引先マスタ">
-              </div>
-              <div class="form-group">
-                <label>同名異コード対処戦略</label>
-                <select id="opt-dedup-strategy">
-                  <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
-                  <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
-                  <option value="warn-only">自動: 警告のみ</option>
-                  <option value="interactive">対話: 1件ずつ選ぶ</option>
-                </select>
-              </div>
+          <div id="partners-options-box" class="options-group-box" style="display:none;">
+            <div class="form-group">
+              <label>取引先マスタ ファイル名プレフィックス</label>
+              <input type="text" id="opt-partners-prefix" value="freee取引先マスタ">
+            </div>
+            <div class="form-group">
+              <label>同名異コード対処戦略</label>
+              <select id="opt-dedup-strategy">
+                <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
+                <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
+                <option value="warn-only">自動: 警告のみ</option>
+                <option value="interactive">対話: 1件ずつ選ぶ</option>
+              </select>
             </div>
           </div>
 
-          <div class="form-row" style="margin-top:16px;">
-            <div class="form-group" style="flex: 1 1 100%;">
+          <div class="options-group-box" style="margin-top:16px;">
+            <div class="form-group">
               <label>非課税+税額矛盾の対処戦略</label>
               <select id="opt-non-taxable-strategy">
                 <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
@@ -343,7 +346,7 @@
                 <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
                 <option value="interactive">対話: 1件ずつ選ぶ</option>
               </select>
-              <small style="color:#666;">奉行原本で「非仕入/非売上」なのに税額がある矛盾起票の対処。freee は「非課仕入では税額を入力できません」エラーになるため対応が必要。</small>
+              <small style="color:#666;">奉行原本で「非売上」なのに税額がある矛盾起票の対処。freee は「非課売上では税額を入力できません」エラーになるため対応が必要。（「非仕入」は「非対仕入10%」等に自動変換されるため対象外）</small>
             </div>
           </div>
           <div style="margin-top:16px; display:flex; gap:8px;">
@@ -430,9 +433,12 @@
       <div class="modal-title">同名異コード — 対処を選択してください</div>
     </div>
     <div class="modal-body" id="dedup-modal-body"></div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-sm" onclick="dedupAutoAll()">全件 自動推奨で決定</button>
-      <button class="btn btn-primary" onclick="dedupConfirm()">次へ (確定)</button>
+    <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="dedupCancel()">← 戻る</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" onclick="dedupAutoAll()">全件 自動推奨で決定</button>
+        <button class="btn btn-primary" onclick="dedupConfirm()">次へ (確定)</button>
+      </div>
     </div>
   </div>
 </div>
@@ -444,9 +450,12 @@
       <div class="modal-title">非課税+税額矛盾 — 対処を選択してください</div>
     </div>
     <div class="modal-body" id="nontax-modal-body"></div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-sm" onclick="nontaxAutoAll()">全件 課対仕入10%/課税売上10% に変更</button>
-      <button class="btn btn-primary" onclick="nontaxConfirm()">決定して変換実行</button>
+    <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="nontaxCancel()">← 戻る</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" onclick="nontaxAutoAll()">全件 課対仕入10%/課税売上10% に変更</button>
+        <button class="btn btn-primary" onclick="nontaxConfirm()">決定して変換実行</button>
+      </div>
     </div>
   </div>
 </div>
@@ -516,10 +525,10 @@ const TAX_MAP = {
   "非売上|8":  "非課売上",
   "非売上|0":  "非課売上",
   "非売上|":   "非課売上",
-  "非仕入|10": "非課仕入",
-  "非仕入|8":  "非課仕入",
-  "非仕入|0":  "非課仕入",
-  "非仕入|":   "非課仕入",
+  "非仕入|10": "非対仕入10%",
+  "非仕入|8":  "非対仕入8%（軽）",
+  "非仕入|0":  "対象外",
+  "非仕入|":   "対象外",
   "対象外|":   "対象外",
   "対象外|10": "対象外",
   "対象外|8":  "対象外",
@@ -769,7 +778,7 @@ function findGroupBumon(rows) {
   return '';
 }
 
-function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom) {
+function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom, nonTaxableResultsCollector) {
   let drCode = r.drPartnerCode;
   let crCode = r.crPartnerCode;
   let drName = r.drPartner;
@@ -814,20 +823,43 @@ function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonT
   }
   const VALID_TAX_TARGETS = new Set([...TAX_CODES_PURCHASE, ...TAX_CODES_SALES]);
   function validatedTarget(tgt, origCode) {
+    // TAX_MAP 変換後「非課仕入」は存在しないため「非課売上」のみ来る → 課税売上10% で十分
     if (tgt && VALID_TAX_TARGETS.has(tgt)) return tgt;
-    return (origCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
+    return '課税売上10%';
   }
-  // 借方
-  if ((drTaxCode === '非課仕入' || drTaxCode === '非課売上') && parseIntSafe(drTaxAmount) !== 0) {
+  // 借方 (TAX_MAP 変換後「非課仕入」は存在しないため「非課売上」のみ対象)
+  if (drTaxCode === '非課売上' && parseIntSafe(drTaxAmount) !== 0) {
+    const origDrTaxCode = drTaxCode;
     const [act, tgt] = resolveChoice('借方');
     if (act === 'zero-tax') drTaxAmount = '0';
     else if (act === 'change-to-taxable') drTaxCode = validatedTarget(tgt, drTaxCode);
+    if (nonTaxableResultsCollector && nonTaxableStrategy !== 'warn-only') {
+      nonTaxableResultsCollector.push({
+        slip_no: r.slipNo, date: r.date, side: '借方',
+        dr_kamoku: r.drKamoku, cr_kamoku: r.crKamoku,
+        amount: parseIntSafe(r.drAmount), tax_amount: parseIntSafe(r.drTaxAmount),
+        orig_tax_code: origDrTaxCode, action: act,
+        result_tax_code: act === 'zero-tax' ? origDrTaxCode : (act === 'change-to-taxable' ? drTaxCode : origDrTaxCode),
+        summary: r.summary || '',
+      });
+    }
   }
-  // 貸方
-  if ((crTaxCode === '非課仕入' || crTaxCode === '非課売上') && parseIntSafe(crTaxAmount) !== 0) {
+  // 貸方 (TAX_MAP 変換後「非課仕入」は存在しないため「非課売上」のみ対象)
+  if (crTaxCode === '非課売上' && parseIntSafe(crTaxAmount) !== 0) {
+    const origCrTaxCode = crTaxCode;
     const [act, tgt] = resolveChoice('貸方');
     if (act === 'zero-tax') crTaxAmount = '0';
     else if (act === 'change-to-taxable') crTaxCode = validatedTarget(tgt, crTaxCode);
+    if (nonTaxableResultsCollector && nonTaxableStrategy !== 'warn-only') {
+      nonTaxableResultsCollector.push({
+        slip_no: r.slipNo, date: r.date, side: '貸方',
+        dr_kamoku: r.drKamoku, cr_kamoku: r.crKamoku,
+        amount: parseIntSafe(r.crAmount), tax_amount: parseIntSafe(r.crTaxAmount),
+        orig_tax_code: origCrTaxCode, action: act,
+        result_tax_code: act === 'zero-tax' ? origCrTaxCode : (act === 'change-to-taxable' ? crTaxCode : origCrTaxCode),
+        summary: r.summary || '',
+      });
+    }
   }
 
   return [
@@ -842,7 +874,7 @@ function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonT
   ];
 }
 
-function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom) {
+function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom, nonTaxableResultsCollector) {
   const allRows = [];
   const slipSizes = [];
   let totalSkipped = 0;
@@ -850,7 +882,7 @@ function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrate
     const groupBumon = findGroupBumon(slipRows);
     const {result, skipped} = applyFukugo(slipRows, groupBumon);
     totalSkipped += skipped;
-    const freeeRows = result.map(r => toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom));
+    const freeeRows = result.map(r => toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom, nonTaxableResultsCollector));
     allRows.push(...freeeRows);
     slipSizes.push([key, freeeRows.length]);
   }
@@ -917,7 +949,13 @@ function auditObcSource(allGroups, dateFrom, dateTo) {
       mismatches.push({slipNo, date, dr, cr});
     }
   }
-  return {mismatches, minusKaubai};
+
+  // 非課税+税額矛盾: 非売上 (3/3) と 非仕入 (業務確認用) に分離
+  const nonTaxableAll = detectNonTaxableFromGroups(allGroups);
+  const nonTaxableSales     = nonTaxableAll.filter(m => m.tax_label === '非売上');
+  const businessReview      = nonTaxableAll.filter(m => m.tax_label === '非仕入');
+
+  return {mismatches, minusKaubai, nonTaxableSales, businessReview};
 }
 
 function parseDateStr(s) {
@@ -1146,6 +1184,7 @@ let selectedFiles = [];
 let conversionResult = null;
 let pendingDedupGroups = null;
 let pendingDedupCallback = null;
+let step2Initialized = false;
 
 // ページ切替
 function showPage(name) {
@@ -1173,16 +1212,23 @@ function goToStep1() {
 
 function goToStep2() {
   if (selectedFiles.length === 0) return;
-  loadSettings();
+  if (!step2Initialized) {
+    loadSettings();
+    step2Initialized = true;
+  }
   document.getElementById('section-step1').style.display = 'none';
   document.getElementById('section-step2').style.display = '';
   document.getElementById('section-step3').style.display = 'none';
   updateStepIndicator(2);
+  // Step2 が表示されるタイミングで btn-execute を確実に有効化
+  const execBtn = document.getElementById('btn-execute');
+  if (execBtn) execBtn.disabled = false;
 }
 
 function resetToStep1() {
   selectedFiles = [];
   conversionResult = null;
+  step2Initialized = false;
   renderFileList();
   document.getElementById('btn-to-step2').disabled = true;
   goToStep1();
@@ -1220,7 +1266,7 @@ function renderFileList() {
 // パートナーオプション表示切替
 function togglePartnerOptions() {
   const show = document.getElementById('opt-output-partners').checked;
-  document.getElementById('partner-options').style.display = show ? '' : 'none';
+  document.getElementById('partners-options-box').style.display = show ? '' : 'none';
 }
 
 // ===========================================================================
@@ -1228,6 +1274,10 @@ function togglePartnerOptions() {
 // ===========================================================================
 
 async function executeConversion() {
+  // 連打防止: 実行中は btn-execute を無効化
+  const execBtn = document.getElementById('btn-execute');
+  if (execBtn) execBtn.disabled = true;
+
   saveSettings();
   const opts = getOptions();
 
@@ -1302,6 +1352,11 @@ async function executeConversion() {
         const sameNameGroups = getSameNameGroups(partnerData.partners);
         if (sameNameGroups.size > 0) {
           const customChoices = await showDedupModal(sameNameGroups, partnerData.allGroups);
+          if (customChoices === null) {
+            // ユーザーキャンセル → Step 2 に戻る
+            goToStep2();
+            return;
+          }
           ({partnerData, codeRewriteMap, nameOverrideMap, auditLog: dedupAuditLog} =
             applyDedupStrategy(partnerData, 'custom', customChoices));
         }
@@ -1317,7 +1372,13 @@ async function executeConversion() {
     if (opts.nonTaxableStrategy === 'interactive' || opts.nonTaxableStrategy === 'custom') {
       const ntMismatches = detectNonTaxableFromGroups(allGroups);
       if (ntMismatches.length > 0) {
-        effectiveNonTaxableCustom = await showNonTaxableModal(ntMismatches);
+        const ntResult = await showNonTaxableModal(ntMismatches);
+        if (ntResult === null) {
+          // ユーザーキャンセル → Step 2 に戻る
+          goToStep2();
+          return;
+        }
+        effectiveNonTaxableCustom = ntResult;
         effectiveNonTaxableStrategy = 'custom';
       } else {
         // 検出ゼロ → 影響なし
@@ -1326,12 +1387,14 @@ async function executeConversion() {
     }
 
     // グループ処理 (非課税戦略も適用)
+    const nonTaxableResultsCollector = [];
     const {allRows, slipSizes, totalSkipped} = processGroups(
       allGroups,
       Object.keys(codeRewriteMap).length ? codeRewriteMap : null,
       Object.keys(nameOverrideMap).length ? nameOverrideMap : null,
       effectiveNonTaxableStrategy,
-      effectiveNonTaxableCustom
+      effectiveNonTaxableCustom,
+      nonTaxableResultsCollector
     );
 
     // 借貸整合性チェック
@@ -1377,6 +1440,7 @@ async function executeConversion() {
       outputFiles, totalInput, totalOutput: allRows.length,
       slipCount: allGroups.size, partnerData, dedupAuditLog,
       errors, balanceResult, auditResult, totalSkipped,
+      nonTaxableResults: nonTaxableResultsCollector,
       opts
     };
 
@@ -1387,6 +1451,9 @@ async function executeConversion() {
   } catch(e) {
     resultEl.innerHTML = `<div class="card"><div class="alert alert-error"><strong>エラー:</strong><br><pre style="white-space:pre-wrap;font-size:12px;">${escHtml(e.message)}</pre></div>
       <button class="btn btn-secondary" onclick="goToStep2()">← オプションに戻る</button></div>`;
+  } finally {
+    // 連打防止解除: キャンセル・エラー・正常完了のすべての退出パスで enabled に戻す
+    if (execBtn) execBtn.disabled = false;
   }
 }
 
@@ -1464,6 +1531,14 @@ function showDedupModal(sameNameGroups, allGroups) {
     modal.style.display = 'flex';
 
     window._dedupResolve = (autoAll) => {
+      // autoAll: true (autoAll) | false (confirm) | 'cancel'
+      // 再呼び出し防止: 呼ばれた瞬間に null クリア
+      window._dedupResolve = null;
+      if (autoAll === 'cancel') {
+        modal.style.display = 'none';
+        resolve(null);  // null = ユーザーキャンセル
+        return;
+      }
       body.querySelectorAll('.dedup-card').forEach(card => {
         const name = card.dataset.name;
         const codes = [...sameNameGroups.get(name)];
@@ -1487,8 +1562,28 @@ function showDedupModal(sameNameGroups, allGroups) {
   });
 }
 
-function dedupAutoAll() { if(window._dedupResolve) window._dedupResolve(true); }
-function dedupConfirm() { if(window._dedupResolve) window._dedupResolve(false); }
+function dedupAutoAll() {
+  if (window._dedupResolve) {
+    const r = window._dedupResolve;
+    window._dedupResolve = null;
+    r(true);
+  }
+}
+function dedupConfirm() {
+  if (window._dedupResolve) {
+    const r = window._dedupResolve;
+    window._dedupResolve = null;
+    r(false);
+  }
+}
+function dedupCancel() {
+  if (window._dedupResolve) {
+    const r = window._dedupResolve;
+    window._dedupResolve = null;
+    r('cancel');
+    // modal.style.display = 'none' は _dedupResolve クロージャ内で実行済
+  }
+}
 
 // ===========================================================================
 // 非課税+税額矛盾 対話モーダル
@@ -1510,8 +1605,8 @@ function detectNonTaxableFromGroups(allGroups) {
   const results = [];
   for (const [key, rows] of allGroups) {
     for (const r of rows) {
-      // 借方
-      if ((r.drTaxLabel === '非仕入' || r.drTaxLabel === '非売上') && parseInt(String(r.drTaxAmount||'0'), 10) !== 0) {
+      // 借方 (非売上のみ対象: 非仕入は TAX_MAP で 非対仕入10% 等に自動変換されるため対象外)
+      if (r.drTaxLabel === '非売上' && parseInt(String(r.drTaxAmount||'0'), 10) !== 0) {
         results.push({
           slip_no: r.slipNo, date: r.date, side: '借方',
           tax_label: r.drTaxLabel,
@@ -1520,8 +1615,8 @@ function detectNonTaxableFromGroups(allGroups) {
           summary: r.summary || '', kamoku: r.drKamoku || '',
         });
       }
-      // 貸方 (奉行原本のラベル: crTaxLabel が存在しないケース → freee 変換後の crTaxCode で判定するしかない)
-      if (r.crTaxLabel && (r.crTaxLabel === '非仕入' || r.crTaxLabel === '非売上') && parseInt(String(r.crTaxAmount||'0'), 10) !== 0) {
+      // 貸方 (非売上のみ対象: 非仕入は TAX_MAP で 非対仕入10% 等に自動変換されるため対象外)
+      if (r.crTaxLabel && r.crTaxLabel === '非売上' && parseInt(String(r.crTaxAmount||'0'), 10) !== 0) {
         results.push({
           slip_no: r.slipNo, date: r.date, side: '貸方',
           tax_label: r.crTaxLabel,
@@ -1555,7 +1650,8 @@ function showNonTaxableModal(mismatches) {
     const body = document.getElementById('nontax-modal-body');
 
     body.innerHTML = mismatches.map((m, idx) => {
-      const candidates = (m.tax_label === '非仕入') ? TAX_CODES_PURCHASE : TAX_CODES_SALES;
+      // 非仕入は今回の修正で非対仕入10%に自動変換されるためここには来ない → 常に TAX_CODES_SALES
+      const candidates = TAX_CODES_SALES;
       const summaryShort = (m.summary || '').slice(0, 30);
       const radioName = `nontax_${idx}`;
       const optionsHtml = candidates.map((c, i) =>
@@ -1583,7 +1679,16 @@ function showNonTaxableModal(mismatches) {
 
     modal.style.display = 'flex';
 
-    window._nontaxResolve = (autoAll) => {
+    window._nontaxResolve = (mode) => {
+      // mode: true (autoAll) | false (confirm) | 'cancel'
+      // 再呼び出し防止: 呼ばれた瞬間に null クリア
+      window._nontaxResolve = null;
+      if (mode === 'cancel') {
+        modal.style.display = 'none';
+        resolve(null);  // null = ユーザーキャンセル
+        return;
+      }
+      const autoAll = (mode === true);
       const choices = {};
       body.querySelectorAll('.dedup-card').forEach(card => {
         const key = card.dataset.key;
@@ -1613,8 +1718,28 @@ function showNonTaxableModal(mismatches) {
   });
 }
 
-function nontaxAutoAll() { if(window._nontaxResolve) window._nontaxResolve(true); }
-function nontaxConfirm() { if(window._nontaxResolve) window._nontaxResolve(false); }
+function nontaxAutoAll() {
+  if (window._nontaxResolve) {
+    const r = window._nontaxResolve;
+    window._nontaxResolve = null;
+    r(true);
+  }
+}
+function nontaxConfirm() {
+  if (window._nontaxResolve) {
+    const r = window._nontaxResolve;
+    window._nontaxResolve = null;
+    r(false);
+  }
+}
+function nontaxCancel() {
+  if (window._nontaxResolve) {
+    const r = window._nontaxResolve;
+    window._nontaxResolve = null;
+    r('cancel');
+    // modal.style.display = 'none' は _nontaxResolve クロージャ内で実行済
+  }
+}
 
 // ===========================================================================
 // 結果レンダリング
@@ -1625,9 +1750,21 @@ function renderResult(r) {
   const partnerCount = r.partnerData ? r.partnerData.partners.size : 0;
   const balanceIssue = r.balanceResult.unknown.length;
 
+  // 要確認件数 統合サマリ (businessReview は対処任意のため除外)
+  const _auditA  = r.partnerData ? r.partnerData.multiNameDetails.length : 0;
+  const _auditB  = r.partnerData ? getSameNameGroups(r.partnerData.partners).size : 0;
+  const _balance = r.auditResult.mismatches.length;
+  const _minus   = r.auditResult.minusKaubai.length;
+  const _ntSales = r.auditResult.nonTaxableSales ? r.auditResult.nonTaxableSales.length : 0;
+  const auditTotal = _auditA + _auditB + _balance + _minus + _ntSales;
+
   // サマリカード
   const summaryHTML = `
     <div class="summary-grid">
+      <div class="summary-card${auditTotal > 0 ? ' warn' : ' ok'}">
+        <div class="summary-card-num">${auditTotal}</div>
+        <div class="summary-card-label">要確認件数${auditTotal === 0 ? ' (問題なし)' : ''}</div>
+      </div>
       <div class="summary-card">
         <div class="summary-card-num">${r.outputFiles.filter(f=>f.type==='journal').length}</div>
         <div class="summary-card-label">仕訳CSVファイル数</div>
@@ -1719,10 +1856,16 @@ function renderResult(r) {
     </div>
     ${auditHTML}
     ${dedupHTML}
+    <div id="nontax-result-section-anchor"></div>
     ${howtoHTML}`;
 
   // 初期タブのテーブルを描画
   renderPreviewTable(0, r.outputFiles[0].rows);
+
+  // 非課税対処結果セクション
+  if (r.nonTaxableResults && r.nonTaxableResults.length > 0) {
+    renderNonTaxableResultsSection(r.nonTaxableResults, r.outputFiles);
+  }
 }
 
 function renderAuditSections(r) {
@@ -1735,7 +1878,7 @@ function renderAuditSections(r) {
   if (audit.mismatches.length > 0) {
     const rows = audit.mismatches.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
       <td>${m.dr.toLocaleString()}</td><td>${m.cr.toLocaleString()}</td><td>${(m.dr-m.cr).toLocaleString()}</td></tr>`).join('');
-    sections.push({title:'[要確認 1/2] 奉行原本の借貸不一致伝票', count: audit.mismatches.length, type:'warn',
+    sections.push({title:'[要確認 1/3] 奉行原本の借貸不一致伝票', count: audit.mismatches.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
@@ -1743,8 +1886,24 @@ function renderAuditSections(r) {
   if (audit.minusKaubai.length > 0) {
     const rows = audit.minusKaubai.map(m => `<tr><td>${escHtml(m.slipNo)}</td><td>${escHtml(m.date)}</td>
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
-    sections.push({title:'[要確認 2/2] 課売上+マイナス (課売返への振替検討)', count: audit.minusKaubai.length, type:'warn',
+    sections.push({title:'[要確認 2/3] 課売上+マイナス (課売返への振替検討)', count: audit.minusKaubai.length, type:'warn',
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>金額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 3. 非課売上+税額あり (freeeエラー対象)
+  if (audit.nonTaxableSales && audit.nonTaxableSales.length > 0) {
+    const rows = audit.nonTaxableSales.map(m => `<tr><td>${escHtml(m.slip_no)}</td><td>${escHtml(m.date)}</td>
+      <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
+    sections.push({title:'[要確認 3/3] 非課売上+税額あり (freeeエラー対象)', count: audit.nonTaxableSales.length, type:'warn',
+      body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 業務確認用: 非仕入+税額あり (freeeエラーなし・参考情報)
+  if (audit.businessReview && audit.businessReview.length > 0) {
+    const rows = audit.businessReview.map(m => `<tr><td>${escHtml(m.slip_no)}</td><td>${escHtml(m.date)}</td>
+      <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
+    sections.push({title:'[参考情報 ※件数外] 非仕入+税額あり (freeeエラーなし・対処任意)', count: audit.businessReview.length, type:'info', isRef: true,
+      body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
   // 取引先 A: 同コード異名
@@ -1791,7 +1950,7 @@ function renderAuditSections(r) {
     <div class="audit-section">
       <div class="audit-header" onclick="toggleAudit(this)">
         <span class="audit-title">${escHtml(s.title)}</span>
-        <span class="audit-badge badge-${s.type}">${s.count}件</span>
+        <span class="audit-badge badge-${s.type}">${s.isRef ? s.count + '件 (件数に算入しません)' : s.count + '件'}</span>
         <span class="audit-chevron">▼</span>
       </div>
       <div class="audit-body">${s.body}</div>
@@ -1805,6 +1964,188 @@ function toggleAudit(header) {
   const body = section.querySelector('.audit-body');
   section.classList.toggle('expanded');
   body.classList.toggle('open');
+}
+
+// ===========================================================================
+// 非課税対処結果セクション (Step3)
+// ===========================================================================
+
+function renderNonTaxableResultsSection(results, outputFiles) {
+  // 既存セクション削除
+  const existing = document.getElementById('nontax-result-section');
+  if (existing) existing.remove();
+
+  if (!results || results.length === 0) return;
+
+  // 元ファイル名を特定 (ダウンロードファイル名用)
+  const firstOutput = outputFiles && outputFiles.length > 0 ? outputFiles[0].name : '';
+  const baseName = firstOutput.replace(/\.[^.]+$/, '') || '変換結果';
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const csvFilename = `非課税対処結果_${baseName}_${today}.csv`;
+
+  // アンカーの直前に挿入
+  const anchor = document.getElementById('nontax-result-section-anchor');
+
+  // セクション本体
+  const section = document.createElement('div');
+  section.id = 'nontax-result-section';
+  section.className = 'card';
+  section.style.marginBottom = '8px';
+
+  // ヘッダー (折りたたみ、初期展開)
+  const headerDiv = document.createElement('div');
+  headerDiv.className = 'audit-header audit-section expanded';
+  headerDiv.style.cssText = 'cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--gray-50);';
+  headerDiv.innerHTML = `
+    <span class="audit-title" style="font-size:13px;font-weight:600;flex:1;">非課税対処結果</span>
+    <span class="audit-badge" style="background:#fff3e0;color:var(--orange);padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">${results.length} 件</span>
+    <span class="audit-chevron" style="font-size:12px;color:var(--gray-500);transition:transform 0.2s;transform:rotate(180deg);">▲</span>`;
+
+  const bodyDiv = document.createElement('div');
+  bodyDiv.className = 'audit-body open';
+  bodyDiv.style.cssText = 'padding:12px 14px;border-top:1px solid var(--gray-200);';
+
+  // ダウンロード + コピーボタン行
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+
+  const btnDl = document.createElement('a');
+  btnDl.className = 'btn btn-success btn-sm';
+  btnDl.style.cssText = 'padding:6px 14px;font-size:13px;cursor:pointer;';
+  btnDl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </svg>CSVダウンロード`;
+  btnDl.setAttribute('download', csvFilename);
+  btnDl.addEventListener('click', (e) => {
+    e.preventDefault();
+    const csvContent = buildNonTaxableCsv(results);
+    const bom = '﻿';
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn btn-secondary btn-sm';
+  btnCopy.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnCopy.textContent = 'テキストエリアを開く / 閉じる';
+  let taVisible = false;
+  const ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.rows = 8;
+  ta.style.cssText = 'width:100%;font-size:12px;font-family:monospace;margin-top:8px;display:none;resize:vertical;';
+  ta.value = buildNonTaxableTabText(results);
+  btnCopy.addEventListener('click', () => {
+    taVisible = !taVisible;
+    ta.style.display = taVisible ? 'block' : 'none';
+    if (taVisible) ta.select();
+  });
+
+  btnRow.appendChild(btnDl);
+  btnRow.appendChild(btnCopy);
+  bodyDiv.appendChild(btnRow);
+  bodyDiv.appendChild(ta);
+
+  // テーブル
+  const table = document.createElement('table');
+  table.className = 'audit-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>伝票No</th><th>日付</th><th>側</th>
+      <th>借方科目</th><th>貸方科目</th>
+      <th>金額</th><th>税額</th>
+      <th>元の税区分</th><th>処理</th><th>適用後の税区分</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+    const actionLabel = {
+      'change-to-taxable': '税区分変更',
+      'zero-tax': '税額を0に修正',
+      'keep': 'そのまま(警告のみ)',
+    }[row.action] || row.action || '';
+    tr.innerHTML = `
+      <td>${escHtml(row.slip_no || '')}</td>
+      <td>${escHtml(row.date || '')}</td>
+      <td>${escHtml(row.side || '')}</td>
+      <td>${escHtml(row.dr_kamoku || '')}</td>
+      <td>${escHtml(row.cr_kamoku || '')}</td>
+      <td style="text-align:right">${escHtml(String(row.amount || ''))}</td>
+      <td style="text-align:right">${escHtml(String(row.tax_amount || ''))}</td>
+      <td>${escHtml(row.orig_tax_code || '')}</td>
+      <td style="color:var(--blue)">${escHtml(actionLabel)}</td>
+      <td><strong>${escHtml(row.result_tax_code || '')}</strong></td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  bodyDiv.appendChild(table);
+
+  // 折りたたみトグル
+  const chevron = headerDiv.querySelector('.audit-chevron');
+  headerDiv.addEventListener('click', () => {
+    const open = bodyDiv.classList.toggle('open');
+    chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+  });
+
+  section.appendChild(headerDiv);
+  section.appendChild(bodyDiv);
+
+  if (anchor) {
+    anchor.parentNode.insertBefore(section, anchor);
+  } else {
+    document.getElementById('result-content').appendChild(section);
+  }
+}
+
+function buildNonTaxableCsv(results) {
+  const headers = ['伝票No', '日付', '側', '借方科目', '貸方科目', '金額', '税額', '元の税区分', '処理', '適用後の税区分', '摘要'];
+  const actionLabel = { 'change-to-taxable': '税区分変更', 'zero-tax': '税額を0に修正', 'keep': 'そのまま(警告のみ)' };
+  const lines = [headers.join(',')];
+  results.forEach(row => {
+    const cells = [
+      row.slip_no || '',
+      row.date || '',
+      row.side || '',
+      row.dr_kamoku || '',
+      row.cr_kamoku || '',
+      String(row.amount || ''),
+      String(row.tax_amount || ''),
+      row.orig_tax_code || '',
+      actionLabel[row.action] || row.action || '',
+      row.result_tax_code || '',
+      row.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildNonTaxableTabText(results) {
+  const headers = ['伝票No', '日付', '側', '借方科目', '貸方科目', '金額', '税額', '元の税区分', '処理', '適用後の税区分', '摘要'];
+  const actionLabel = { 'change-to-taxable': '税区分変更', 'zero-tax': '税額を0に修正', 'keep': 'そのまま(警告のみ)' };
+  const lines = [headers.join('\t')];
+  results.forEach(row => {
+    lines.push([
+      row.slip_no || '',
+      row.date || '',
+      row.side || '',
+      row.dr_kamoku || '',
+      row.cr_kamoku || '',
+      String(row.amount || ''),
+      String(row.tax_amount || ''),
+      row.orig_tax_code || '',
+      actionLabel[row.action] || row.action || '',
+      row.result_tax_code || '',
+      row.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
 }
 
 // ===========================================================================
