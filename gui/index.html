@@ -147,6 +147,17 @@
             </select>
             <p class="form-hint">※ 「取引先マスタも生成する」を有効にした場合のみ機能します</p>
           </div>
+
+          <div class="form-group form-group-full">
+            <label for="non-taxable-strategy">非課税+税額矛盾の対処方法</label>
+            <select id="non-taxable-strategy" class="form-control">
+              <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
+              <option value="zero-tax">自動: 税額を 0 に修正 (税区分維持、税控除なし)</option>
+              <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
+              <option value="custom">対話: 1 件ずつ選ぶ</option>
+            </select>
+            <p class="form-hint">※ 奉行原本で「非仕入/非売上」なのに税額がある矛盾起票の対処。freee は「非課仕入では税額を入力できません」エラーになるため対応が必要</p>
+          </div>
         </div>
 
         <div class="step-actions step-actions-split">

@@ -333,6 +333,19 @@
               </div>
             </div>
           </div>
+
+          <div class="form-row" style="margin-top:16px;">
+            <div class="form-group" style="flex: 1 1 100%;">
+              <label>非課税+税額矛盾の対処戦略</label>
+              <select id="opt-non-taxable-strategy">
+                <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
+                <option value="zero-tax">自動: 税額を 0 に修正 (税区分維持、税控除なし)</option>
+                <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
+                <option value="interactive">対話: 1件ずつ選ぶ</option>
+              </select>
+              <small style="color:#666;">奉行原本で「非仕入/非売上」なのに税額がある矛盾起票の対処。freee は「非課仕入では税額を入力できません」エラーになるため対応が必要。</small>
+            </div>
+          </div>
           <div style="margin-top:16px; display:flex; gap:8px;">
             <button class="btn btn-secondary" onclick="goToStep1()">← 戻る</button>
             <button class="btn btn-primary" id="btn-execute" onclick="executeConversion()">変換実行</button>
@@ -742,7 +755,7 @@ function findGroupBumon(rows) {
   return '';
 }
 
-function toFreeeRow(r, codeRewriteMap, nameOverrideMap) {
+function toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom) {
   let drCode = r.drPartnerCode;
   let crCode = r.crPartnerCode;
   let drName = r.drPartner;
@@ -755,19 +768,55 @@ function toFreeeRow(r, codeRewriteMap, nameOverrideMap) {
     if (drCode in nameOverrideMap) drName = nameOverrideMap[drCode];
     if (crCode in nameOverrideMap) crName = nameOverrideMap[crCode];
   }
+
+  // 非課税+税額矛盾の対処 (Python の to_freee_row と同等)
+  let drTaxCode = r.drTaxCode;
+  let drTaxAmount = r.drTaxAmount;
+  let crTaxCode = r.crTaxCode;
+  let crTaxAmount = r.crTaxAmount;
+  function parseIntSafe(v) {
+    const s = String(v ?? '').trim();
+    if (!s || s === '0') return 0;
+    const n = parseInt(s, 10);
+    return isNaN(n) ? 0 : n;
+  }
+  function resolveAction(side) {
+    if (nonTaxableStrategy === 'zero-tax' || nonTaxableStrategy === 'change-to-taxable') {
+      return nonTaxableStrategy;
+    }
+    if ((nonTaxableStrategy === 'custom' || nonTaxableStrategy === 'interactive') && nonTaxableCustom) {
+      const key = `${r.slipNo}_${side}`;
+      const choice = nonTaxableCustom[key];
+      return choice ? (choice.action || 'keep') : 'keep';
+    }
+    return 'keep';
+  }
+  // 借方
+  if ((drTaxCode === '非課仕入' || drTaxCode === '非課売上') && parseIntSafe(drTaxAmount) !== 0) {
+    const act = resolveAction('借方');
+    if (act === 'zero-tax') drTaxAmount = '0';
+    else if (act === 'change-to-taxable') drTaxCode = (drTaxCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
+  }
+  // 貸方
+  if ((crTaxCode === '非課仕入' || crTaxCode === '非課売上') && parseIntSafe(crTaxAmount) !== 0) {
+    const act = resolveAction('貸方');
+    if (act === 'zero-tax') crTaxAmount = '0';
+    else if (act === 'change-to-taxable') crTaxCode = (crTaxCode === '非課仕入') ? '課対仕入10%' : '課税売上10%';
+  }
+
   return [
     '[明細行]', r.date, r.slipNo, '',
     r.drKamoku, '', r.drHojo, drName, drCode,
     r.drBumon, '', '', '', '', '',
-    r.drAmount, r.drTaxCode, r.drTaxAmount,
+    r.drAmount, drTaxCode, drTaxAmount,
     r.crKamoku, '', r.crHojo, crName, crCode,
     r.crBumon, '', '', '', '', '',
-    r.crAmount, r.crTaxCode, r.crTaxAmount,
+    r.crAmount, crTaxCode, crTaxAmount,
     r.summary
   ];
 }
 
-function processGroups(groups, codeRewriteMap, nameOverrideMap) {
+function processGroups(groups, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom) {
   const allRows = [];
   const slipSizes = [];
   let totalSkipped = 0;
@@ -775,7 +824,7 @@ function processGroups(groups, codeRewriteMap, nameOverrideMap) {
     const groupBumon = findGroupBumon(slipRows);
     const {result, skipped} = applyFukugo(slipRows, groupBumon);
     totalSkipped += skipped;
-    const freeeRows = result.map(r => toFreeeRow(r, codeRewriteMap, nameOverrideMap));
+    const freeeRows = result.map(r => toFreeeRow(r, codeRewriteMap, nameOverrideMap, nonTaxableStrategy, nonTaxableCustom));
     allRows.push(...freeeRows);
     slipSizes.push([key, freeeRows.length]);
   }
@@ -1236,11 +1285,13 @@ async function executeConversion() {
       }
     }
 
-    // グループ処理
+    // グループ処理 (非課税戦略も適用)
     const {allRows, slipSizes, totalSkipped} = processGroups(
       allGroups,
       Object.keys(codeRewriteMap).length ? codeRewriteMap : null,
-      Object.keys(nameOverrideMap).length ? nameOverrideMap : null
+      Object.keys(nameOverrideMap).length ? nameOverrideMap : null,
+      opts.nonTaxableStrategy,
+      opts.nonTaxableCustom || null
     );
 
     // 借貸整合性チェック
@@ -1314,6 +1365,8 @@ function getOptions() {
     outputPartners: document.getElementById('opt-output-partners').checked,
     partnersPrefix: document.getElementById('opt-partners-prefix').value || 'freee取引先マスタ',
     dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+    nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'change-to-taxable'}).value,
+    nonTaxableCustom: null,  // モーダル UI が実装されたら設定される
     knownMismatches,
   };
 }
@@ -1732,6 +1785,7 @@ function saveSettings() {
       outputPartners: document.getElementById('opt-output-partners').checked,
       partnersPrefix: document.getElementById('opt-partners-prefix').value,
       dedupStrategy: document.getElementById('opt-dedup-strategy').value,
+      nonTaxableStrategy: (document.getElementById('opt-non-taxable-strategy') || {value: 'change-to-taxable'}).value,
       knownMismatches: document.getElementById('opt-known-mismatches').value,
     }));
   } catch(e) {}
@@ -1750,6 +1804,10 @@ function loadSettings() {
     }
     if (s.partnersPrefix) document.getElementById('opt-partners-prefix').value = s.partnersPrefix;
     if (s.dedupStrategy) document.getElementById('opt-dedup-strategy').value = s.dedupStrategy;
+    if (s.nonTaxableStrategy) {
+      const el = document.getElementById('opt-non-taxable-strategy');
+      if (el) el.value = s.nonTaxableStrategy;
+    }
     if (s.knownMismatches != null) document.getElementById('opt-known-mismatches').value = s.knownMismatches;
   } catch(e) {}
 }

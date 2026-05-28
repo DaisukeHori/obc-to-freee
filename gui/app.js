@@ -268,9 +268,14 @@ function applySettingsToForm(s) {
   if (s.partnersPrefix  !== undefined) document.getElementById('partners-prefix').value = s.partnersPrefix;
   if (s.encoding        !== undefined) document.getElementById('encoding').value         = s.encoding;
   if (s.dedupStrategy   !== undefined) document.getElementById('dedup-strategy').value   = s.dedupStrategy;
+  if (s.nonTaxableStrategy !== undefined) {
+    const el = document.getElementById('non-taxable-strategy');
+    if (el) el.value = s.nonTaxableStrategy;
+  }
 }
 
 function collectFormValues() {
+  const ntEl = document.getElementById('non-taxable-strategy');
   return {
     outputPrefix:   document.getElementById('output-prefix').value.trim(),
     rowsPerFile:    parseInt(document.getElementById('rows-per-file').value, 10) || 10000,
@@ -278,6 +283,7 @@ function collectFormValues() {
     partnersPrefix: document.getElementById('partners-prefix').value.trim(),
     encoding:       document.getElementById('encoding').value,
     dedupStrategy:  document.getElementById('dedup-strategy').value,
+    nonTaxableStrategy: ntEl ? ntEl.value : 'change-to-taxable',
   };
 }
 
@@ -335,6 +341,7 @@ function buildFormData(opts) {
   formData.append('partnersPrefix', opts.partnersPrefix);
   formData.append('encoding',       opts.encoding);
   formData.append('dedupStrategy',  opts.dedupStrategy || 'warn-only');
+  formData.append('nonTaxableStrategy', opts.nonTaxableStrategy || 'change-to-taxable');
   const dateFrom = document.getElementById('date-from').value;
   const dateTo   = document.getElementById('date-to').value;
   if (dateFrom) formData.append('dateFrom', dateFrom);
