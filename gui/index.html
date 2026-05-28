@@ -120,9 +120,23 @@
             </label>
           </div>
 
-          <div id="partners-prefix-group" class="form-group form-group-full" style="display:none">
-            <label for="partners-prefix">取引先マスタ ファイル名プレフィックス</label>
-            <input type="text" id="partners-prefix" class="form-control" value="freee取引先マスタ">
+          <!-- 取引先マスタ生成 関連オプション (青枠 box) -->
+          <div id="partners-options-box" class="options-group-box" style="display:none">
+            <div class="form-group">
+              <label for="partners-prefix">取引先マスタ ファイル名プレフィックス</label>
+              <input type="text" id="partners-prefix" class="form-control" value="freee取引先マスタ">
+            </div>
+            <div class="form-group">
+              <label for="dedup-strategy">同名異コード対処方法</label>
+              <select id="dedup-strategy" class="form-control">
+                <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
+                <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
+                <option value="merge-lowest">自動: 最小コードに統合</option>
+                <option value="merge-highest">自動: 最大コードに統合</option>
+                <option value="warn-only">自動: 警告のみ (何も変更しない)</option>
+                <option value="custom">対話: 1 件ずつ選ぶ</option>
+              </select>
+            </div>
           </div>
 
           <div class="form-group">
@@ -135,28 +149,18 @@
             </select>
           </div>
 
-          <div class="form-group form-group-full" id="dedup-strategy-group" style="display:none">
-            <label for="dedup-strategy">同名異コード対処方法</label>
-            <select id="dedup-strategy" class="form-control">
-              <option value="merge-most-used">自動: 最頻使用コードに統合 (推奨)</option>
-              <option value="suffix">自動: 別名化 (_2, _3 付与)</option>
-              <option value="merge-lowest">自動: 最小コードに統合</option>
-              <option value="merge-highest">自動: 最大コードに統合</option>
-              <option value="warn-only">自動: 警告のみ (何も変更しない)</option>
-              <option value="custom">対話: 1 件ずつ選ぶ</option>
-            </select>
-            <p class="form-hint">※ 「取引先マスタも生成する」を有効にした場合のみ機能します</p>
-          </div>
-
-          <div class="form-group form-group-full">
-            <label for="non-taxable-strategy">非課税+税額矛盾の対処方法</label>
-            <select id="non-taxable-strategy" class="form-control">
-              <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
-              <option value="zero-tax">自動: 税額を 0 に修正 (税区分維持、税控除なし)</option>
-              <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
-              <option value="custom">対話: 1 件ずつ選ぶ</option>
-            </select>
-            <p class="form-hint">※ 奉行原本で「非仕入/非売上」なのに税額がある矛盾起票の対処。freee は「非課仕入では税額を入力できません」エラーになるため対応が必要</p>
+          <!-- 非課税+税額矛盾 対処オプション (青枠 box、常時表示) -->
+          <div class="options-group-box">
+            <div class="form-group">
+              <label for="non-taxable-strategy">非課税+税額矛盾の対処方法</label>
+              <select id="non-taxable-strategy" class="form-control">
+                <option value="change-to-taxable">自動: 税区分を 課対仕入10%/課税売上10% に変更 (推奨、税控除あり)</option>
+                <option value="zero-tax">自動: 税額を 0 に修正 (税区分維持、税控除なし)</option>
+                <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
+                <option value="custom">対話: 1 件ずつ選ぶ</option>
+              </select>
+              <p class="form-hint">※ 奉行原本で「非売上」なのに税額がある矛盾起票の対処。freee は「非課売上では税額を入力できません」エラーになるため対応が必要。（「非仕入」は「非対仕入10%」等に自動変換されるため対象外）</p>
+            </div>
           </div>
         </div>
 
@@ -349,7 +353,7 @@
   <div id="nontax-modal" class="modal-overlay" style="display:none">
     <div class="modal-box modal-box-lg">
       <h3>非課税+税額矛盾の対処を選択</h3>
-      <p id="nontax-modal-desc">税区分が「非仕入/非売上」(非課税) なのに税額が入っている行が見つかりました。freee エラーを避けるため、各行の対処を選んでください。</p>
+      <p id="nontax-modal-desc">税区分が「非売上」(非課税売上) なのに税額が入っている行が見つかりました。freee は「非課売上では税額を入力できません」エラーを返すため、各行の対処を選んでください。</p>
 
       <div class="dedup-modal-toolbar">
         <button type="button" id="btn-nontax-auto-all" class="btn btn-ghost btn-sm-inner">
