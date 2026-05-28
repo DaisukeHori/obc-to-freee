@@ -156,6 +156,40 @@ TAX_MAP = {
     ("", "0"):        "対象外",
 }
 
+# 税区分マスタ (非課税+税額矛盾の change-to-taxable 戦略で選択肢として使用)
+# 仕入系: 借方の非仕入をどの freee 税区分に変更するかの候補
+TAX_CODES_PURCHASE = [
+    "課対仕入10%",
+    "課対仕入8%（軽）",
+    "共対仕入10%",
+    "共対仕入8%（軽）",
+    "課対仕入（控80）10%",
+    "課対仕入（控80）8%（軽）",
+    "共対仕入（控80)10%".replace("10%", "10%"),  # placeholder for consistency
+    "共対仕入（控80）8%（軽）",
+    "対象外",
+]
+# 上記の placeholder を修正
+TAX_CODES_PURCHASE = [
+    "課対仕入10%",
+    "課対仕入8%（軽）",
+    "共対仕入10%",
+    "共対仕入8%（軽）",
+    "課対仕入（控80）10%",
+    "課対仕入（控80）8%（軽）",
+    "共対仕入（控80）10%",
+    "共対仕入（控80）8%（軽）",
+    "対象外",
+]
+# 売上系: 貸方の非売上をどの freee 税区分に変更するかの候補
+TAX_CODES_SALES = [
+    "課税売上10%",
+    "課税売上8%（軽）",
+    "課税売返10%",
+    "課税売返8%（軽）",
+    "対象外",
+]
+
 # エラーカテゴリ定数
 CAT_TAX = "CAT_TAX"
 CAT_AMOUNT = "CAT_AMOUNT"
@@ -833,32 +867,38 @@ def to_freee_row(r: dict,
         except (ValueError, TypeError):
             return 0
 
-    def _resolve_action(side: str) -> str:
-        """この行の側 (借方/貸方) に適用する action を返す。
-        return: 'zero-tax' | 'change-to-taxable' | 'keep'
+    def _resolve_choice(side: str) -> tuple:
+        """この行の側 (借方/貸方) に適用する (action, target_code) を返す。
+        action: 'zero-tax' | 'change-to-taxable' | 'keep'
+        target_code: change-to-taxable の場合の変更先 freee 税区分 (None ならデフォルト 10%)
         """
-        if non_taxable_strategy in ("zero-tax", "change-to-taxable"):
-            return non_taxable_strategy
+        if non_taxable_strategy == "zero-tax":
+            return ("zero-tax", None)
+        if non_taxable_strategy == "change-to-taxable":
+            return ("change-to-taxable", None)  # デフォルト 10%
         if non_taxable_strategy in ("custom", "interactive") and non_taxable_custom:
             key = f"{r.get('slip_no', '')}_{side}"
             choice = non_taxable_custom.get(key, {})
-            return choice.get("action", "keep")
-        return "keep"  # warn-only or unspecified
+            return (choice.get("action", "keep"), choice.get("target_code"))
+        return ("keep", None)
+
+    def _default_taxable(orig_code: str) -> str:
+        return "課対仕入10%" if orig_code == "非課仕入" else "課税売上10%"
 
     # 借方側
     if dr_tax_code in ("非課仕入", "非課売上") and _parse_int(dr_tax_amount) != 0:
-        act = _resolve_action("借方")
+        act, tgt = _resolve_choice("借方")
         if act == "zero-tax":
             dr_tax_amount = "0"
         elif act == "change-to-taxable":
-            dr_tax_code = "課対仕入10%" if dr_tax_code == "非課仕入" else "課税売上10%"
+            dr_tax_code = tgt if tgt else _default_taxable(dr_tax_code)
     # 貸方側
     if cr_tax_code in ("非課仕入", "非課売上") and _parse_int(cr_tax_amount) != 0:
-        act = _resolve_action("貸方")
+        act, tgt = _resolve_choice("貸方")
         if act == "zero-tax":
             cr_tax_amount = "0"
         elif act == "change-to-taxable":
-            cr_tax_code = "課対仕入10%" if cr_tax_code == "非課仕入" else "課税売上10%"
+            cr_tax_code = tgt if tgt else _default_taxable(cr_tax_code)
 
     return [
         "[明細行]",  # [表題行]
@@ -2244,24 +2284,50 @@ def main():
                 print(f"\n[{i}/{len(detected)}] 伝票 No.{m['slip_no']} ({m['date']}) {m['side']}", file=sys.stderr)
                 print(f"  税区分: {m['tax_label']} / 本体 {m['amount']:,} / 税額 {m['tax_amount']:,}", file=sys.stderr)
                 print(f"  勘定科目: {m.get('kamoku','')} / 摘要: {m['summary'][:30]}", file=sys.stderr)
+                # 元税区分に応じた変更先候補マスタ
+                if m['tax_label'] == '非仕入':
+                    candidates = TAX_CODES_PURCHASE
+                    default_taxable = "課対仕入10%"
+                else:
+                    candidates = TAX_CODES_SALES
+                    default_taxable = "課税売上10%"
                 print(f"  対処を選択:", file=sys.stderr)
-                print(f"    (1) change-to-taxable: 税区分を {'課対仕入10%' if m['tax_label']=='非仕入' else '課税売上10%'} に変更 (推奨、税控除あり)", file=sys.stderr)
-                print(f"    (2) zero-tax: 税額を 0 に修正 (税区分維持、税控除なし)", file=sys.stderr)
+                print(f"    (c) change-to-taxable: 税区分を変更 (推奨、税控除あり)", file=sys.stderr)
+                print(f"        変更先候補:", file=sys.stderr)
+                for ci, code in enumerate(candidates, 1):
+                    marker = " ← 推奨" if code == default_taxable else ""
+                    print(f"          [{ci}] {code}{marker}", file=sys.stderr)
+                print(f"    (z) zero-tax: 税額を 0 に修正 (税区分維持、税控除なし)", file=sys.stderr)
                 print(f"    (k) keep: そのまま (freee エラー継続)", file=sys.stderr)
+                target_code = None
                 while True:
-                    sys.stderr.write("選択 (1/2/k、デフォルト 1): ")
+                    sys.stderr.write(f"選択 (c<番号>/z/k、例: c1=推奨、デフォルト c1): ")
                     sys.stderr.flush()
                     line = sys.stdin.readline().strip().lower()
-                    if line in ("", "1"):
-                        action = "change-to-taxable"; break
-                    elif line == "2":
+                    if line in ("", "c", "c1"):
+                        action = "change-to-taxable"
+                        target_code = candidates[0]  # デフォルト推奨 (10%)
+                        break
+                    elif line.startswith("c") and line[1:].isdigit():
+                        idx = int(line[1:]) - 1
+                        if 0 <= idx < len(candidates):
+                            action = "change-to-taxable"
+                            target_code = candidates[idx]
+                            break
+                        else:
+                            print(f"不正な番号です。1〜{len(candidates)} を指定してください。", file=sys.stderr)
+                            continue
+                    elif line == "z":
                         action = "zero-tax"; break
                     elif line == "k":
                         action = "keep"; break
                     else:
-                        print("不正な選択です。1/2/k を入力してください。", file=sys.stderr)
+                        print("不正な選択です。c<番号> / z / k を入力してください。", file=sys.stderr)
                 key = f"{m['slip_no']}_{m['side']}"
-                non_taxable_custom[key] = {"action": action}
+                entry = {"action": action}
+                if target_code:
+                    entry["target_code"] = target_code
+                non_taxable_custom[key] = entry
             print("\n[interactive] 全件の選択を保存しました。", file=sys.stderr)
 
     # 全グループ変換 (process_groups は (all_rows, slip_sizes) を返す)

@@ -1523,24 +1523,46 @@ function detectNonTaxableFromGroups(allGroups) {
   return results;
 }
 
+// 税区分マスタ (Python の TAX_CODES_PURCHASE / TAX_CODES_SALES と同期)
+const TAX_CODES_PURCHASE = [
+  '課対仕入10%', '課対仕入8%（軽）',
+  '共対仕入10%', '共対仕入8%（軽）',
+  '課対仕入（控80）10%', '課対仕入（控80）8%（軽）',
+  '共対仕入（控80）10%', '共対仕入（控80）8%（軽）',
+  '対象外',
+];
+const TAX_CODES_SALES = [
+  '課税売上10%', '課税売上8%（軽）',
+  '課税売返10%', '課税売返8%（軽）',
+  '対象外',
+];
+
 function showNonTaxableModal(mismatches) {
   return new Promise((resolve) => {
     const modal = document.getElementById('nontax-modal');
     const body = document.getElementById('nontax-modal-body');
 
     body.innerHTML = mismatches.map((m, idx) => {
-      const taxableCode = m.tax_label === '非仕入' ? '課対仕入10%' : '課税売上10%';
+      const candidates = (m.tax_label === '非仕入') ? TAX_CODES_PURCHASE : TAX_CODES_SALES;
       const summaryShort = (m.summary || '').slice(0, 30);
       const radioName = `nontax_${idx}`;
+      const optionsHtml = candidates.map((c, i) =>
+        `<option value="${escAttr(c)}"${i === 0 ? ' selected' : ''}>${escHtml(c)}${i === 0 ? ' (推奨)' : ''}</option>`
+      ).join('');
       return `
         <div class="dedup-card" data-key="${m.slip_no}_${m.side}" data-idx="${idx}">
           <div class="dedup-card-name">伝票 No.${escHtml(m.slip_no)} (${escHtml(m.date)}) ${escHtml(m.side)}</div>
           <div style="margin:8px 0; font-size:14px; color:#555">
-            税区分: <strong>${escHtml(m.tax_label)}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
+            奉行原本: 税区分 <strong>${escHtml(m.tax_label)}</strong> / 本体 ${m.amount.toLocaleString()} / 税額 ${m.tax_amount.toLocaleString()}<br>
             勘定科目: ${escHtml(m.kamoku || '')} / 摘要: ${escHtml(summaryShort)}
           </div>
           <div class="radio-options">
-            <label><input type="radio" name="${radioName}" value="change-to-taxable" checked> 税区分を <strong>${taxableCode}</strong> に変更 (推奨、税控除あり)</label>
+            <label style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
+              <input type="radio" name="${radioName}" value="change-to-taxable" checked>
+              <span>税区分を変更:</span>
+              <select class="form-control nontax-target" style="display:inline-block; width:auto; max-width:260px">${optionsHtml}</select>
+              <small style="color:#666">(推奨、税控除あり)</small>
+            </label>
             <label><input type="radio" name="${radioName}" value="zero-tax"> 税額を 0 に修正 (税区分維持、税控除なし)</label>
             <label><input type="radio" name="${radioName}" value="keep"> そのまま (freee エラー継続)</label>
           </div>
@@ -1555,13 +1577,23 @@ function showNonTaxableModal(mismatches) {
         const key = card.dataset.key;
         const idx = card.dataset.idx;
         let action;
+        let target_code = null;
         if (autoAll) {
           action = 'change-to-taxable';
+          // 元税区分から仕入/売上を判定して推奨先を target_code に
+          const mm = mismatches[idx];
+          target_code = (mm.tax_label === '非仕入') ? TAX_CODES_PURCHASE[0] : TAX_CODES_SALES[0];
         } else {
           const checked = card.querySelector(`input[name="nontax_${idx}"]:checked`);
           action = checked ? checked.value : 'change-to-taxable';
+          if (action === 'change-to-taxable') {
+            const select = card.querySelector('select.nontax-target');
+            if (select) target_code = select.value;
+          }
         }
-        choices[key] = { action };
+        const entry = { action };
+        if (target_code) entry.target_code = target_code;
+        choices[key] = entry;
       });
       modal.style.display = 'none';
       resolve(choices);
