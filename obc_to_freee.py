@@ -1086,7 +1086,15 @@ def write_output(
 ):
     """
     freee33列行リストを分割してUTF-8 BOM CSVに書き出す。
-    伝票(日付+伝票番号)の途中で分割しない。
+    伝票(日付+伝票番号)の途中で分割しない + rows_per_file を上限厳守。
+
+    分割ロジック (上限厳守):
+    - 次伝票を加えると current_count が rows_per_file を超える場合は、
+      現在のファイルを閉じてその伝票を次のファイルの先頭に送る。
+    - 結果として全出力ファイルは rows_per_file 以下 (データ行数) を保証。
+    - 例外: 1 伝票単体が rows_per_file を超える場合は、伝票境界を保つため
+      1 ファイルに収めて stderr に WARN を出す (これは奉行データ起因)。
+
     slip_sizes は [(key, freee行数), ...] の形式 (process_groups が返す値)。
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -1108,9 +1116,27 @@ def write_output(
         while slip_cursor < len(slip_sizes):
             _, slip_size = slip_sizes[slip_cursor]
 
-            # しきい値に達しているが伝票境界ならファイルを閉じる
-            # (ただし1伝票もまだ書いていない場合はそのまま書く)
-            if current_count >= rows_per_file and current_count > 0:
+            # 例外: 1 伝票単体で上限を超える場合
+            if slip_size > rows_per_file:
+                if current_count > 0:
+                    # 既に蓄積がある → 現在ファイルを先に閉じて、超過伝票は次ファイルへ
+                    break
+                # 蓄積ゼロ → この超過伝票を 1 ファイルにそのまま収める + WARN
+                print(
+                    f"WARN: 1 伝票で {slip_size} 行あり、--rows-per-file "
+                    f"({rows_per_file}) を超えています。伝票境界を保つため "
+                    f"1 ファイルに収めます。",
+                    file=sys.stderr,
+                )
+                for i in range(slip_size):
+                    file_rows.append(all_rows[row_cursor + i])
+                row_cursor += slip_size
+                current_count += slip_size
+                slip_cursor += 1
+                break  # 単独ファイルなのでループ抜ける
+
+            # 通常伝票: 次伝票を加えると上限超なら現在ファイルを閉じる
+            if current_count > 0 and current_count + slip_size > rows_per_file:
                 break
 
             # この伝票の行を追加

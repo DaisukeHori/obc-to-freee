@@ -1014,22 +1014,53 @@ function applySuffix(name, codes, usage, partners, nameOverrideMap) {
   });
 }
 
-// ファイル分割 (伝票境界をまたがない)
+// ファイル分割 (伝票境界をまたがない + rowsPerFile を上限厳守)
+// 戻り値: {files: Array<Array<row>>, warnings: Array<string>}
+// 仕様:
+// - 次伝票を加えると rowsPerFile を超える場合は現在ファイルを閉じて次ファイル先頭へ送る
+// - 1 伝票単体が rowsPerFile を超える場合のみ、伝票境界保持のため 1 ファイルに収め warnings に記録
 function splitOutputFiles(allRows, slipSizes, rowsPerFile) {
   const files = [];
+  const warnings = [];
   let fileRows = [], currentCount = 0, rowCursor = 0, slipCursor = 0;
 
   while (slipCursor < slipSizes.length) {
-    if (currentCount >= rowsPerFile && currentCount > 0) {
+    const slipSize = slipSizes[slipCursor][1];
+
+    // 例外: 1 伝票単体が上限超
+    if (slipSize > rowsPerFile) {
+      if (currentCount > 0) {
+        // 蓄積を先に閉じる、超過伝票は次ファイルへ
+        files.push([...fileRows]);
+        fileRows = []; currentCount = 0;
+        continue;  // 同じ slipCursor で再判定 (今度は蓄積ゼロで超過伝票単独ファイルへ)
+      }
+      // 蓄積ゼロ → 超過伝票を 1 ファイルに収める
+      const msg = `WARN: 1 伝票で ${slipSize} 行あり、--rows-per-file (${rowsPerFile}) を超えています。伝票境界を保つため 1 ファイルに収めます。`;
+      warnings.push(msg);
+      console.warn(msg);
+      const oneSlipRows = [];
+      for (let i = 0; i < slipSize; i++) oneSlipRows.push(allRows[rowCursor + i]);
+      files.push(oneSlipRows);
+      rowCursor += slipSize; slipCursor++;
+      // 蓄積はゼロのまま継続
+      continue;
+    }
+
+    // 通常: 加えると上限超なら現在ファイルを閉じる
+    if (currentCount > 0 && currentCount + slipSize > rowsPerFile) {
       files.push([...fileRows]);
       fileRows = []; currentCount = 0;
+      // 同じ伝票で再ループ (次ファイルに加える)
+      continue;
     }
-    const slipSize = slipSizes[slipCursor][1];
+
+    // 加える
     for (let i = 0; i < slipSize; i++) fileRows.push(allRows[rowCursor + i]);
     rowCursor += slipSize; currentCount += slipSize; slipCursor++;
   }
   if (fileRows.length > 0) files.push(fileRows);
-  return files;
+  return { files, warnings };
 }
 
 // ===========================================================================
@@ -1219,8 +1250,14 @@ async function executeConversion() {
     // 奉行原本監査
     const auditResult = auditObcSource(allGroups, opts.dateFrom, opts.dateTo);
 
-    // ファイル分割
-    const fileParts = splitOutputFiles(allRows, slipSizes, opts.rowsPerFile);
+    // ファイル分割 (上限厳守、戻り値は {files, warnings})
+    const splitResult = splitOutputFiles(allRows, slipSizes, opts.rowsPerFile);
+    const fileParts = splitResult.files;
+    // 1 伝票単体が上限超の警告があれば auditResult に統合
+    if (splitResult.warnings && splitResult.warnings.length > 0) {
+      if (!auditResult.splitWarnings) auditResult.splitWarnings = [];
+      auditResult.splitWarnings.push(...splitResult.warnings);
+    }
 
     // CSV Blob 生成
     const outputFiles = [];
