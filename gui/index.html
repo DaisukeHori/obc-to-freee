@@ -149,6 +149,20 @@
             </select>
           </div>
 
+          <!-- 対象外+税額 対処オプション (青枠 box、常時表示) -->
+          <div class="options-group-box">
+            <div class="form-group">
+              <label for="outside-tax-strategy">対象外+税額の対処方法</label>
+              <select id="outside-tax-strategy" class="form-control">
+                <option value="zero-tax">自動: 税額を 0 に強制 (推奨・freee エラー回避)</option>
+                <option value="warn-only">自動: 警告のみ (freee エラー継続)</option>
+                <option value="skip">自動: 該当伝票を除外</option>
+                <option value="custom">対話: 1件ずつ確認</option>
+              </select>
+              <p class="form-hint">※ 税区分「対象外」なのに税額がある行 (消費税中間納付 等の奉行独自記録) の対処。freee は「対象外では税額を入力できません」エラーになるため対応が必要。</p>
+            </div>
+          </div>
+
           <!-- 非課税+税額矛盾 対処オプション (青枠 box、常時表示) -->
           <div class="options-group-box">
             <div class="form-group">
@@ -508,6 +522,42 @@
       <div class="modal-actions" style="margin-top:20px">
         <button id="btn-bf-cancel" class="btn btn-ghost">← 戻る</button>
         <button id="btn-bf-execute" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          次へ (確定)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 対象外+税額補正 custom 対話モーダル -->
+  <div id="outside-tax-modal" class="modal-overlay" style="display:none">
+    <div class="modal-box modal-box-lg">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <h3 style="flex:1;margin:0;">対象外+税額の補正確認</h3>
+        <button type="button" id="btn-ot-dl-csv" class="btn btn-success btn-sm-inner" title="候補一覧をCSVダウンロード">📥 CSV</button>
+        <button type="button" id="btn-ot-copy" class="btn btn-ghost btn-sm-inner" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+      <div id="ot-modal-copy-area" style="display:none;margin-bottom:8px;">
+        <textarea id="ot-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
+      </div>
+      <p id="ot-modal-desc">税区分「対象外」なのに税額がある行が見つかりました。各行の対処方法を選んでください。</p>
+
+      <div class="dedup-modal-toolbar">
+        <button type="button" id="btn-ot-auto-all" class="btn btn-ghost btn-sm-inner">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          全件 税額0化で決定
+        </button>
+      </div>
+
+      <div id="ot-cards-container" class="dedup-cards-container"></div>
+
+      <div class="modal-actions" style="margin-top:20px">
+        <button id="btn-ot-cancel" class="btn btn-ghost">← 戻る</button>
+        <button id="btn-ot-execute" class="btn btn-primary">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3"/>
           </svg>
