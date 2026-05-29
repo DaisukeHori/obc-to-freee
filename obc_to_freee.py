@@ -1311,6 +1311,222 @@ def apply_kauuri_rebate(groups: OrderedDict,
 
 
 # ---------------------------------------------------------------------------
+# 対象外税区分+税額補正 (apply_outside_tax_strategy)
+# ---------------------------------------------------------------------------
+
+def _detect_outside_tax_mismatches(all_groups: dict) -> list:
+    """
+    グループ化済みデータから「税区分=対象外」かつ「税額>0」の行を検出して返す。
+    奉行独自ルールで仮払消費税科目に消費税額を独自記録するケースが対象。
+    freee は「対象外では税額を入力できません」エラーを返す。
+
+    戻り値: [{
+        "slip_no": str, "date": str, "side": "借方"|"貸方",
+        "kamoku": str, "amount": str, "tax_amount": str, "summary": str
+    }, ...]
+    """
+    results = []
+    for key, slip_rows in all_groups.items():
+        slip_no = key[1] if isinstance(key, tuple) and len(key) >= 2 else str(key)
+        date_str = key[0] if isinstance(key, tuple) and len(key) >= 1 else ""
+        for r in slip_rows:
+            # 借方側: 税区分=対象外 かつ 税額>0
+            dr_tax_code = r.get("dr_tax_code", "")
+            dr_tax_amount = r.get("dr_tax_amount", "0")
+            try:
+                dr_tax_int = int(str(dr_tax_amount).strip() or "0")
+            except (ValueError, TypeError):
+                dr_tax_int = 0
+            if dr_tax_code == "対象外" and dr_tax_int != 0:
+                results.append({
+                    "slip_no": slip_no,
+                    "date": date_str,
+                    "side": "借方",
+                    "kamoku": r.get("dr_kamoku", ""),
+                    "amount": str(r.get("dr_amount", "")),
+                    "tax_amount": str(dr_tax_amount),
+                    "summary": r.get("summary", ""),
+                })
+            # 貸方側: 税区分=対象外 かつ 税額>0
+            cr_tax_code = r.get("cr_tax_code", "")
+            cr_tax_amount = r.get("cr_tax_amount", "0")
+            try:
+                cr_tax_int = int(str(cr_tax_amount).strip() or "0")
+            except (ValueError, TypeError):
+                cr_tax_int = 0
+            if cr_tax_code == "対象外" and cr_tax_int != 0:
+                results.append({
+                    "slip_no": slip_no,
+                    "date": date_str,
+                    "side": "貸方",
+                    "kamoku": r.get("cr_kamoku", ""),
+                    "amount": str(r.get("cr_amount", "")),
+                    "tax_amount": str(cr_tax_amount),
+                    "summary": r.get("summary", ""),
+                })
+    return results
+
+
+def apply_outside_tax_strategy(all_groups: dict, strategy: str,
+                                custom_choices: dict = None):
+    """
+    「税区分=対象外」かつ「税額>0」の行に対して補正戦略を適用する。
+
+    strategy:
+      'warn-only'  — 警告のみ、グループ変更なし
+      'zero-tax'   — 税額を 0 に強制 (推奨デフォルト、freee エラー回避)
+      'skip'       — 該当伝票を変換から除外
+      'custom'     — custom_choices に従って件別処理
+
+    custom_choices: {"<slip_no>_<side>": {"action": "zero-tax"|"skip"|"keep"}, ...}
+
+    戻り値: (updated_groups, outside_tax_log, skip_slips)
+      outside_tax_log: [{slip_no, date, side, kamoku, amount, orig_tax_amount,
+                         corrected_tax_amount, action}, ...]
+      skip_slips: skip された伝票番号のセット
+    """
+    from collections import OrderedDict as _OD
+
+    if strategy == "warn-only":
+        return all_groups, [], set()
+
+    mismatches = _detect_outside_tax_mismatches(all_groups)
+    if not mismatches:
+        return all_groups, [], set()
+
+    # slip_no + side → mismatch のマップ
+    mismatch_map = {}
+    for m in mismatches:
+        k = (m["slip_no"], m["side"])
+        if k not in mismatch_map:
+            mismatch_map[k] = []
+        mismatch_map[k].append(m)
+
+    # skip 対象の伝票番号セット (custom の skip は行単位ではなく伝票単位)
+    skip_slip_nos: set = set()
+    if strategy == "custom" and custom_choices:
+        for key_str, choice in custom_choices.items():
+            if choice.get("action") == "skip":
+                # key_str = "<slip_no>_<side>" → slip_no を取り出す
+                # side は "借方" or "貸方" (1文字ではない) → rsplit で末尾を除去
+                parts = key_str.rsplit("_", 1)
+                if len(parts) == 2:
+                    skip_slip_nos.add(parts[0])
+    elif strategy == "skip":
+        for m in mismatches:
+            skip_slip_nos.add(m["slip_no"])
+
+    updated_groups = _OD()
+    outside_tax_log = []
+    result_skip_slips: set = set()
+
+    for key, slip_rows in all_groups.items():
+        slip_no = key[1] if isinstance(key, tuple) and len(key) >= 2 else str(key)
+        date_str = key[0] if isinstance(key, tuple) and len(key) >= 1 else ""
+
+        # skip 対象伝票: 全行を除外
+        if slip_no in skip_slip_nos:
+            result_skip_slips.add(slip_no)
+            # ログ記録 (対象行ごと)
+            for m in mismatches:
+                if m["slip_no"] == slip_no:
+                    try:
+                        orig_ta = int(str(m["tax_amount"]).strip() or "0")
+                    except (ValueError, TypeError):
+                        orig_ta = 0
+                    outside_tax_log.append({
+                        "slip_no": slip_no, "date": date_str,
+                        "side": m["side"], "kamoku": m["kamoku"],
+                        "amount": m["amount"], "orig_tax_amount": orig_ta,
+                        "corrected_tax_amount": orig_ta,
+                        "action": "skip",
+                    })
+            continue  # updated_groups にキー追加しない → 除外
+
+        # 行単位の補正処理
+        new_rows = []
+        for r in slip_rows:
+            row = dict(r)
+
+            # 借方側チェック
+            dr_tax_code = r.get("dr_tax_code", "")
+            dr_tax_amount = r.get("dr_tax_amount", "0")
+            try:
+                dr_ta_int = int(str(dr_tax_amount).strip() or "0")
+            except (ValueError, TypeError):
+                dr_ta_int = 0
+
+            if dr_tax_code == "対象外" and dr_ta_int != 0:
+                # アクション決定
+                if strategy == "custom" and custom_choices:
+                    choice_key = f"{slip_no}_借方"
+                    act = custom_choices.get(choice_key, {}).get("action", "zero-tax")
+                elif strategy == "zero-tax":
+                    act = "zero-tax"
+                else:
+                    act = "zero-tax"
+
+                if act == "zero-tax":
+                    row["dr_tax_amount"] = "0"
+                    corrected = 0
+                elif act == "keep":
+                    corrected = dr_ta_int
+                else:
+                    corrected = dr_ta_int
+
+                outside_tax_log.append({
+                    "slip_no": slip_no, "date": date_str,
+                    "side": "借方", "kamoku": r.get("dr_kamoku", ""),
+                    "amount": str(r.get("dr_amount", "")),
+                    "orig_tax_amount": dr_ta_int,
+                    "corrected_tax_amount": corrected,
+                    "action": act,
+                    "summary": r.get("summary", ""),
+                })
+
+            # 貸方側チェック
+            cr_tax_code = r.get("cr_tax_code", "")
+            cr_tax_amount = r.get("cr_tax_amount", "0")
+            try:
+                cr_ta_int = int(str(cr_tax_amount).strip() or "0")
+            except (ValueError, TypeError):
+                cr_ta_int = 0
+
+            if cr_tax_code == "対象外" and cr_ta_int != 0:
+                if strategy == "custom" and custom_choices:
+                    choice_key = f"{slip_no}_貸方"
+                    act = custom_choices.get(choice_key, {}).get("action", "zero-tax")
+                elif strategy == "zero-tax":
+                    act = "zero-tax"
+                else:
+                    act = "zero-tax"
+
+                if act == "zero-tax":
+                    row["cr_tax_amount"] = "0"
+                    corrected = 0
+                elif act == "keep":
+                    corrected = cr_ta_int
+                else:
+                    corrected = cr_ta_int
+
+                outside_tax_log.append({
+                    "slip_no": slip_no, "date": date_str,
+                    "side": "貸方", "kamoku": r.get("cr_kamoku", ""),
+                    "amount": str(r.get("cr_amount", "")),
+                    "orig_tax_amount": cr_ta_int,
+                    "corrected_tax_amount": corrected,
+                    "action": act,
+                    "summary": r.get("summary", ""),
+                })
+
+            new_rows.append(row)
+
+        updated_groups[key] = new_rows
+
+    return updated_groups, outside_tax_log, result_skip_slips
+
+
+# ---------------------------------------------------------------------------
 # 借貸不一致補完 (apply_balance_fill_strategy)
 # ---------------------------------------------------------------------------
 
@@ -2376,6 +2592,7 @@ def _detect_kauuri_mismatches(input_files: list, date_from=None, date_to=None,
 def audit_obc_source(input_files: list, date_from=None, date_to=None,
                      quiet: bool = False, encoding: str = "auto",
                      kauuri_rebate_log: list = None,
+                     outside_tax_log: list = None,
                      balance_fill_log: list = None):
     """
     奉行原本 CSV を直接走査して以下の3種を stderr に出力する。
@@ -2415,6 +2632,9 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
 
     # C: 非課税+税額矛盾行リスト [(slip_no, date_str, side, tax_label, amount, tax_amount, summary), ...]  # 7要素
     non_taxable_mismatches: list = []
+
+    # D: 対象外+税額あり 矛盾行リスト [(slip_no, date_str, side, kamoku, amount, tax_amount, summary), ...]
+    outside_tax_mismatches_audit: list = []
 
     for fpath in input_files:
         try:
@@ -2522,8 +2742,47 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
                         except ValueError:
                             pass
 
+                    # --- D: 対象外区分 + 税額あり 矛盾検出 ---
+                    # 奉行の「対象外」税区分に消費税額が記録されているケース (仮払消費税等)
+                    # TAX_MAP 変換後は「対象外」になるため、税区分略称「対象外」と空文字で判定
+                    # (奉行側では税区分略称が「対象外」のまま税額が入っている)
+                    if dr_tax_label in ("対象外", ""):
+                        try:
+                            dr_tax_amt_d = int(dr_tax_amount_str) if dr_tax_amount_str else 0
+                            if dr_tax_amt_d != 0:
+                                dr_kamoku_d = get_col(row, header_idx, OBC_COL_DR_KAMOKU).strip()
+                                dr_amt_d = int(dr_val) if dr_val else 0
+                                outside_tax_mismatches_audit.append(
+                                    (slip_no, date_str, "借方", dr_kamoku_d, dr_amt_d, dr_tax_amt_d, summary)
+                                )
+                        except ValueError:
+                            pass
+                    if cr_tax_label in ("対象外", ""):
+                        try:
+                            cr_tax_amt_d = int(cr_tax_amount_str) if cr_tax_amount_str else 0
+                            if cr_tax_amt_d != 0:
+                                cr_kamoku_d = get_col(row, header_idx, OBC_COL_CR_KAMOKU).strip()
+                                cr_amt_d = int(cr_val) if cr_val else 0
+                                outside_tax_mismatches_audit.append(
+                                    (slip_no, date_str, "貸方", cr_kamoku_d, cr_amt_d, cr_tax_amt_d, summary)
+                                )
+                        except ValueError:
+                            pass
+
         except OSError as e:
             print(f"WARN: 監査用ファイル読み込み失敗: {fpath}: {e}", file=sys.stderr)
+
+    # --- outside tax 補正済み (slip_no, side) セットを構築 ---
+    # zero-tax または skip 済みは監査警告から除外する
+    # keep は補完されていないため警告に残す
+    outside_tax_zeroed_keys: set = set()
+    if outside_tax_log:
+        for entry in outside_tax_log:
+            if entry.get("action") in ("zero-tax", "skip"):
+                _sn = entry.get("slip_no", "")
+                _side = entry.get("side", "")
+                if _sn:
+                    outside_tax_zeroed_keys.add((_sn, _side))
 
     # --- balance fill 済み (slip_no, date) セットを構築 ---
     # auto-fill または skip 済み伝票のみ監査警告から除外する
@@ -2620,6 +2879,36 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     else:
         print("  (該当なし)", file=sys.stderr)
 
+    # --- D: 対象外+税額あり 矛盾の出力 (outside_tax_log で補完済みを除外) ---
+    _outside_tax_filtered = [
+        (s, d, sd, km, a, ta, sm) for s, d, sd, km, a, ta, sm in outside_tax_mismatches_audit
+        if (s, sd) not in outside_tax_zeroed_keys
+    ]
+
+    print("", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("[要確認] 対象外区分 + 税額あり (freee インポートエラー対象)", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("奉行原本で税区分が「対象外」なのに税額が入っている起票です。", file=sys.stderr)
+    print("(仮払消費税科目等に消費税額を独自記録する奉行の慣習によるものが多い)", file=sys.stderr)
+    print("freee は「対象外では税額を入力できません」エラーを返すため、", file=sys.stderr)
+    print("以下のいずれかの対処が必要:", file=sys.stderr)
+    print("  - --outside-tax-strategy=zero-tax で税額を 0 に強制 (推奨デフォルト)", file=sys.stderr)
+    print("  - --outside-tax-strategy=skip で該当伝票を除外", file=sys.stderr)
+    print("  - --outside-tax-strategy=warn-only で警告のみ (freee エラー継続)", file=sys.stderr)
+    print("", file=sys.stderr)
+    if _outside_tax_filtered:
+        for slip_no, date_str, side, kamoku, amount, tax_amount, summary in _outside_tax_filtered:
+            summary_short = summary[:20] if summary else ""
+            print(
+                f"  No. {slip_no} ({date_str}) {side} 科目 {kamoku} / "
+                f"本体 {amount:,} / 税額 {tax_amount:,} 摘要: {summary_short}",
+                file=sys.stderr,
+            )
+        print(f"  合計 {len(_outside_tax_filtered)} 件", file=sys.stderr)
+    else:
+        print("  (該当なし)", file=sys.stderr)
+
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
     print("[業務確認用] 非仕入区分 + 税額あり (freee エラーではなく業務データ確認用)", file=sys.stderr)
@@ -2647,7 +2936,7 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     print("", file=sys.stderr)
     print(sep, file=sys.stderr)
     print("変換処理は正常完了しました。上記「借貸不一致」「課売上マイナス」は freee エラー扱いではなく", file=sys.stderr)
-    print("経理担当の業務的確認推奨、「非課売上+税額あり」は freee がエラーで弾く項目、", file=sys.stderr)
+    print("経理担当の業務的確認推奨、「非課売上+税額あり」「対象外+税額あり」は freee がエラーで弾く項目、", file=sys.stderr)
     print("「業務確認用」は freee エラーにならないが奉行データの妥当性確認推奨。", file=sys.stderr)
     print("", file=sys.stderr)
     print("※ 同一伝票で借方=非売上+税額、貸方=非仕入+税額の両方に該当する場合、", file=sys.stderr)
@@ -2844,6 +3133,40 @@ def main():
             "GUI の対話フロー Phase 1 で使用。"
         ),
     )
+    parser.add_argument(
+        "--outside-tax-strategy",
+        dest="outside_tax_strategy",
+        choices=["warn-only", "zero-tax", "skip", "custom"],
+        default="zero-tax",
+        help=(
+            "対象外税区分 + 税額あり の対処戦略 (デフォルト: zero-tax)。"
+            "奉行が仮払消費税科目等に消費税額を独自記録するケースが対象。"
+            "warn-only=警告のみで freee エラー継続 / "
+            "zero-tax=税額を 0 に強制 (推奨、freee エラー回避) / "
+            "skip=該当伝票を除外 / "
+            "custom=--outside-tax-custom-json で指定した JSON に従う"
+        ),
+    )
+    parser.add_argument(
+        "--outside-tax-custom-json",
+        dest="outside_tax_custom_json",
+        default=None,
+        help=(
+            "--outside-tax-strategy=custom 時のカスタム選択 JSON ファイルパス。"
+            'フォーマット: {"<伝票No>_<側>": {"action": "zero-tax"|"skip"|"keep"}, ...}'
+            ' 例: {"003711_借方": {"action": "zero-tax"}}'
+        ),
+    )
+    parser.add_argument(
+        "--detect-outside-tax-only",
+        dest="detect_outside_tax_only",
+        action="store_true",
+        default=False,
+        help=(
+            "対象外+税額矛盾を検出して JSON 形式で stdout に出力し、変換は行わない。"
+            "GUI の対話フロー Phase 1 で使用。"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -2900,6 +3223,12 @@ def main():
     if args.detect_balance_fill_only:
         mismatches = _detect_balance_fill_mismatches(all_groups)
         print(json.dumps({"success": True, "balanceFillMismatches": mismatches}, ensure_ascii=False, indent=2))
+        return
+
+    # --detect-outside-tax-only モード: 対象外+税額矛盾を検出して JSON 出力して終了
+    if args.detect_outside_tax_only:
+        mismatches = _detect_outside_tax_mismatches(all_groups)
+        print(json.dumps({"success": True, "outsideTaxMismatches": mismatches}, ensure_ascii=False, indent=2))
         return
 
     # --detect-duplicates-only モード: 同名異コード検出して JSON 出力して終了
@@ -2982,6 +3311,32 @@ def main():
             custom_choices=kauuri_rebate_custom,
         )
         print(f"[課売返] 振替変換: {len(kauuri_rebate_log)} 件処理", file=sys.stderr)
+
+    # 対象外+税額補正戦略準備
+    outside_tax_custom: dict = None
+    if args.outside_tax_strategy == "custom" and args.outside_tax_custom_json:
+        try:
+            with open(args.outside_tax_custom_json, "r", encoding="utf-8") as _f:
+                outside_tax_custom = json.load(_f)
+            print(f"[対象外税額] custom 選択 JSON 読み込み: {args.outside_tax_custom_json} ({len(outside_tax_custom)} 件)")
+        except Exception as e:
+            print(f"[対象外税額] custom JSON 読み込み失敗: {e} — zero-tax にフォールバック", file=sys.stderr)
+            args.outside_tax_strategy = "zero-tax"
+
+    # 対象外+税額補正 (kauuri 振替後、balance_fill の前に適用)
+    outside_tax_log = []
+    outside_tax_skip_slips: set = set()
+    if args.outside_tax_strategy != "warn-only":
+        all_groups, outside_tax_log, outside_tax_skip_slips = apply_outside_tax_strategy(
+            all_groups,
+            strategy=args.outside_tax_strategy,
+            custom_choices=outside_tax_custom,
+        )
+        if outside_tax_log:
+            zeroed = sum(1 for e in outside_tax_log if e.get("action") == "zero-tax")
+            skipped = len(outside_tax_skip_slips)
+            kept = sum(1 for e in outside_tax_log if e.get("action") == "keep")
+            print(f"[対象外税額] 矛盾 {len(outside_tax_log)} 件 (税額0化: {zeroed} / 除外: {skipped} / 維持: {kept})", file=sys.stderr)
 
     # 借貸不一致補完戦略準備
     balance_fill_custom: dict = None
@@ -3129,9 +3484,11 @@ def main():
 
     # 奉行原本監査ログ (stderr)
     # Warning-1: kauuri 振替済伝票を課売上マイナス警告から除外するためログを渡す
+    # Warning-OT: outside_tax 補正済みを対象外+税額警告から除外するためログを渡す
     audit_obc_source(args.input, date_from, date_to,
                      quiet=args.quiet_audit, encoding=args.encoding,
                      kauuri_rebate_log=kauuri_rebate_log,
+                     outside_tax_log=outside_tax_log if outside_tax_log else None,
                      balance_fill_log=balance_fill_log if balance_fill_log else None)
 
     # 元伝票詳細 JSON (stderr、GUI が抽出して使用)
@@ -3177,6 +3534,10 @@ def main():
     # 課売返振替結果 JSON (stderr、GUI が抽出して使用)
     if kauuri_rebate_log and args.kauuri_rebate_strategy != "warn-only":
         print(f"KAUURI_REBATE_JSON:{json.dumps(kauuri_rebate_log, ensure_ascii=False)}", file=sys.stderr)
+
+    # 対象外+税額補正結果 JSON (stderr、GUI が抽出して使用)
+    if outside_tax_log and args.outside_tax_strategy != "warn-only":
+        print(f"OUTSIDE_TAX_JSON:{json.dumps(outside_tax_log, ensure_ascii=False)}", file=sys.stderr)
 
     # 借貸補完結果 JSON (stderr、GUI が抽出して使用)
     if balance_fill_log and args.balance_fill_strategy != "warn-only":

@@ -72,6 +72,7 @@
 | 📒 取引先マスタ CSV 生成 | 奉行原本から取引先コード+名のユニークリストを抽出、freee 取引先インポート用 57 列テンプレート準拠 CSV を出力 |
 | 🤝 同名重複対処 | 同一名に複数コードがある場合、対話的または自動で統合 / 別名化 / スキップを選択 (7 戦略) |
 | 🧮 整合性検算 | 6 層検算 (列数 / 税区分 / 金額 / 列数 / 日付 / 借貸合計) |
+| ⚠️ 対象外+税額補正 | 税区分「対象外」なのに税額がある行 (消費税中間納付等の奉行独自記録) を自動検出し、税額を 0 に強制 / 伝票除外 / 1件ずつ確認 の 4 戦略で対処 (`--outside-tax-strategy`) |
 
 ---
 
@@ -229,6 +230,9 @@ python obc_to_freee.py --input 奉行_勘定奉行仕分伝票データ上.csv �
 | `--balance-fill-account` | — | `仮受消費税` | 補完行の勘定科目名 (`auto-fill` 戦略時) |
 | `--balance-fill-custom-json` | — | — | `custom` 戦略時の選択を JSON ファイルで指定 |
 | `--detect-balance-fill-only` | — | — | 借貸不一致伝票の検出結果のみ JSON で stdout 出力して終了 |
+| `--outside-tax-strategy` | — | `zero-tax` | 「対象外」区分+税額あり行の対処戦略 (`zero-tax` / `warn-only` / `skip` / `custom`) |
+| `--outside-tax-custom-json` | — | — | `custom` 戦略時の選択を JSON ファイルで指定 |
+| `--detect-outside-tax-only` | — | — | 対象外+税額の検出結果のみ JSON で stdout 出力して終了 |
 
 ### 期間カット例
 

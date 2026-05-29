@@ -247,6 +247,23 @@ def extract_balance_fill_results(stderr: str) -> list:
     return []
 
 
+def extract_outside_tax_results(stderr: str) -> list:
+    """
+    stderr から OUTSIDE_TAX_JSON: 行を抽出して list で返す。
+    フォーマット: OUTSIDE_TAX_JSON:[{...}, ...]
+    """
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("OUTSIDE_TAX_JSON:"):
+            json_part = stripped[len("OUTSIDE_TAX_JSON:"):]
+            try:
+                return json.loads(json_part)
+            except Exception as e:
+                print(f"[GUI] OUTSIDE_TAX_JSON パース失敗: {e}")
+                return []
+    return []
+
+
 def extract_slip_details(stderr: str) -> dict:
     """
     stderr から SLIP_DETAILS_JSON: 行を抽出して dict で返す。
@@ -377,7 +394,8 @@ def collect_output_files(output_dir: str, partners_prefix: str) -> list:
 # サマリ計算
 # ---------------------------------------------------------------------------
 
-def build_summary(outputs: list, audit: dict, balance_fill_results: list = None) -> dict:
+def build_summary(outputs: list, audit: dict, balance_fill_results: list = None,
+                  outside_tax_results: list = None) -> dict:
     total_slip_rows = 0
     total_partner_count = 0
     slip_files = 0
@@ -399,6 +417,7 @@ def build_summary(outputs: list, audit: dict, balance_fill_results: list = None)
         "nonTaxableSalesWarnings": audit.get("nonTaxableSalesWarnings", []),
         "businessReview":          audit.get("businessReview", []),
         "balanceFillResults":      balance_fill_results or [],
+        "outsideTaxResults":       outside_tax_results or [],
     }
 
 
@@ -668,10 +687,11 @@ class Handler(BaseHTTPRequestHandler):
             kauuri_rebate_kamoku = fields.get("kauuriRebateKamoku", "売上値引高").strip() or "売上値引高"
             balance_fill_strategy = fields.get("balanceFillStrategy", "auto-fill").strip() or "auto-fill"
             balance_fill_account = fields.get("balanceFillAccount", "仮受消費税").strip() or "仮受消費税"
+            outside_tax_strategy = fields.get("outsideTaxStrategy", "zero-tax").strip() or "zero-tax"
 
             input_file_data = files  # [{ "filename": str, "data": bytes }]
 
-            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}, non_taxable={non_taxable_strategy}, kauuri={kauuri_rebate_strategy}, balance_fill={balance_fill_strategy}")
+            print(f"[GUI] POST /api/convert: {len(input_file_data)} files, prefix={output_prefix}, dedup={dedup_strategy}, non_taxable={non_taxable_strategy}, kauuri={kauuri_rebate_strategy}, outside_tax={outside_tax_strategy}, balance_fill={balance_fill_strategy}")
 
             if not input_file_data:
                 self._send_json({"success": False, "error": "入力ファイルが指定されていません"})
@@ -745,6 +765,17 @@ class Handler(BaseHTTPRequestHandler):
                 cmd += ["--kauuri-rebate-strategy", kauuri_rebate_strategy]
                 cmd += ["--kauuri-rebate-kamoku", kauuri_rebate_kamoku]
 
+            # 対象外+税額補正戦略 (custom は 400 で弾く)
+            if outside_tax_strategy == "custom":
+                self._send_json(
+                    {"success": False, "error": "outside_tax custom 戦略は /api/upload-and-detect + /api/convert-with-choices フローでのみ使用してください"},
+                    status=400,
+                )
+                return
+            valid_ot_strategies = {"warn-only", "zero-tax", "skip"}
+            if outside_tax_strategy in valid_ot_strategies:
+                cmd += ["--outside-tax-strategy", outside_tax_strategy]
+
             # 借貸補完戦略 (custom は 400 で弾く)
             if balance_fill_strategy == "custom":
                 self._send_json(
@@ -781,6 +812,9 @@ class Handler(BaseHTTPRequestHandler):
             # 課売返振替結果抽出
             kauuri_rebate_results = extract_kauuri_rebate_results(result.stderr)
 
+            # 対象外+税額補正結果抽出
+            outside_tax_results = extract_outside_tax_results(result.stderr)
+
             # 借貸補完結果抽出
             balance_fill_results = extract_balance_fill_results(result.stderr)
 
@@ -791,7 +825,8 @@ class Handler(BaseHTTPRequestHandler):
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
             # サマリ
-            summary = build_summary(outputs, audit, balance_fill_results=balance_fill_results)
+            summary = build_summary(outputs, audit, balance_fill_results=balance_fill_results,
+                                    outside_tax_results=outside_tax_results)
 
             # Suggestion-6: SLIP_DETAILS_JSON 行を history に含めない (slipDetails は別キー保存済)
             stderr_for_history = "\n".join(
@@ -809,6 +844,7 @@ class Handler(BaseHTTPRequestHandler):
                 "dedupAudit": dedup_audit,
                 "nonTaxableResults": non_taxable_results,
                 "kauuriRebateResults": kauuri_rebate_results,
+                "outsideTaxResults": outside_tax_results,
                 "balanceFillResults": balance_fill_results,
                 "slipDetails": slip_details,
             }
@@ -890,6 +926,7 @@ class Handler(BaseHTTPRequestHandler):
             # kauuri_rebate オプション取得
             kauuri_rebate_strategy_meta = fields.get("kauuriRebateStrategy", "warn-only").strip() or "warn-only"
             kauuri_rebate_kamoku_meta = fields.get("kauuriRebateKamoku", "売上値引高").strip() or "売上値引高"
+            outside_tax_strategy_meta = fields.get("outsideTaxStrategy", "zero-tax").strip() or "zero-tax"
             balance_fill_strategy_meta = fields.get("balanceFillStrategy", "auto-fill").strip() or "auto-fill"
             balance_fill_account_meta = fields.get("balanceFillAccount", "仮受消費税").strip() or "仮受消費税"
 
@@ -906,6 +943,7 @@ class Handler(BaseHTTPRequestHandler):
                 "partnersPrefix": partners_prefix,
                 "kauuriRebateStrategy": kauuri_rebate_strategy_meta,
                 "kauuriRebateKamoku": kauuri_rebate_kamoku_meta,
+                "outsideTaxStrategy": outside_tax_strategy_meta,
                 "balanceFillStrategy": balance_fill_strategy_meta,
                 "balanceFillAccount": balance_fill_account_meta,
             }
@@ -988,6 +1026,40 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"[GUI] detect non-taxable JSON パース失敗: {e}")
 
+            # --detect-outside-tax-only で対象外+税額矛盾を検出
+            outside_tax_mismatches = []
+            if outside_tax_strategy_meta == "custom":
+                cmd_ot = [
+                    sys.executable,
+                    str(SCRIPT_DIR / "obc_to_freee.py"),
+                    "--input", *input_paths,
+                    "--output-dir", str(upload_dir),
+                    "--output-prefix", "detect_tmp_ot",
+                    "--encoding", encoding,
+                    "--detect-outside-tax-only",
+                ]
+                if date_from:
+                    cmd_ot += ["--from", date_from]
+                if date_to:
+                    cmd_ot += ["--to", date_to]
+                result_ot = subprocess.run(
+                    cmd_ot,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(SCRIPT_DIR),
+                )
+                if result_ot.returncode == 0 and result_ot.stdout.strip():
+                    try:
+                        stdout_text = result_ot.stdout.strip()
+                        json_start = stdout_text.find("{")
+                        if json_start >= 0:
+                            ot_result = json.loads(stdout_text[json_start:])
+                            outside_tax_mismatches = ot_result.get("outsideTaxMismatches", [])
+                    except Exception as e:
+                        print(f"[GUI] detect outside-tax JSON パース失敗: {e}")
+
             # --detect-kauuri-only で課売上+マイナス起票を検出
             kauuri_mismatches = []
             if kauuri_rebate_strategy_meta == "custom":
@@ -1062,9 +1134,10 @@ class Handler(BaseHTTPRequestHandler):
                 "duplicates": duplicates,
                 "nonTaxableMismatches": non_taxable_mismatches,
                 "kauuriMismatches": kauuri_mismatches,
+                "outsideTaxMismatches": outside_tax_mismatches,
                 "balanceFillMismatches": balance_fill_mismatches,
             })
-            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 (非売上のみ) {len(non_taxable_mismatches)} 件 / 課売返候補 {len(kauuri_mismatches)} 件 / 借貸補完候補 {len(balance_fill_mismatches)} 件")
+            print(f"[GUI] upload-and-detect 完了: 同名異コード {len(duplicates)} 件 / 非課税矛盾 (非売上のみ) {len(non_taxable_mismatches)} 件 / 課売返候補 {len(kauuri_mismatches)} 件 / 対象外税額 {len(outside_tax_mismatches)} 件 / 借貸補完候補 {len(balance_fill_mismatches)} 件")
 
         except Exception as e:
             import traceback
@@ -1096,6 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
             dedup_choices = req.get("dedupChoices", {})
             non_taxable_choices = req.get("nonTaxableChoices", {})
             kauuri_choices = req.get("kauuriChoices", {})
+            outside_tax_choices = req.get("outsideTaxChoices", {})
             balance_fill_choices = req.get("balanceFillChoices", {})
 
             if not upload_token:
@@ -1132,6 +1206,7 @@ class Handler(BaseHTTPRequestHandler):
             partners_prefix = meta.get("partnersPrefix", "freee取引先マスタ")
             kauuri_rebate_strategy_from_meta = meta.get("kauuriRebateStrategy", "warn-only")
             kauuri_rebate_kamoku_from_meta = meta.get("kauuriRebateKamoku", "売上値引高")
+            outside_tax_strategy_from_meta = meta.get("outsideTaxStrategy", "zero-tax")
             balance_fill_strategy_from_meta = meta.get("balanceFillStrategy", "auto-fill")
             balance_fill_account_from_meta = meta.get("balanceFillAccount", "仮受消費税")
 
@@ -1154,6 +1229,11 @@ class Handler(BaseHTTPRequestHandler):
             kauuri_custom_json_path = upload_dir / "_kauuri_choices.json"
             with open(kauuri_custom_json_path, "w", encoding="utf-8") as f:
                 json.dump(kauuri_choices, f, ensure_ascii=False, indent=2)
+
+            # 対象外+税額 custom JSON を一時ファイルに書き出し
+            ot_custom_json_path = upload_dir / "_outside_tax_choices.json"
+            with open(ot_custom_json_path, "w", encoding="utf-8") as f:
+                json.dump(outside_tax_choices, f, ensure_ascii=False, indent=2)
 
             # 借貸補完 custom JSON を一時ファイルに書き出し
             bf_custom_json_path = upload_dir / "_balance_fill_choices.json"
@@ -1196,6 +1276,15 @@ class Handler(BaseHTTPRequestHandler):
                     cmd += ["--kauuri-rebate-strategy", kauuri_rebate_strategy_from_meta]
                     cmd += ["--kauuri-rebate-kamoku", kauuri_rebate_kamoku_from_meta]
 
+            # 対象外+税額補正戦略 (meta から)
+            valid_ot = {"warn-only", "zero-tax", "skip", "custom"}
+            if outside_tax_strategy_from_meta in valid_ot:
+                if outside_tax_strategy_from_meta == "custom" and outside_tax_choices:
+                    cmd += ["--outside-tax-strategy", "custom"]
+                    cmd += ["--outside-tax-custom-json", str(ot_custom_json_path)]
+                elif outside_tax_strategy_from_meta != "warn-only":
+                    cmd += ["--outside-tax-strategy", outside_tax_strategy_from_meta]
+
             # 借貸補完戦略 (meta から)
             valid_bf = {"warn-only", "auto-fill", "skip", "custom"}
             if balance_fill_strategy_from_meta in valid_bf:
@@ -1205,7 +1294,7 @@ class Handler(BaseHTTPRequestHandler):
                 if balance_fill_strategy_from_meta == "custom" and balance_fill_choices:
                     cmd += ["--balance-fill-custom-json", str(bf_custom_json_path)]
 
-            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, dedup={len(dedup_choices)}, non_taxable={len(non_taxable_choices)}, kauuri={kauuri_rebate_strategy_from_meta} kauuri_choices={len(kauuri_choices)}, balance_fill={balance_fill_strategy_from_meta} bf_choices={len(balance_fill_choices)}")
+            print(f"[GUI] POST /api/convert-with-choices: token={upload_token}, dedup={len(dedup_choices)}, non_taxable={len(non_taxable_choices)}, kauuri={kauuri_rebate_strategy_from_meta} kauuri_choices={len(kauuri_choices)}, outside_tax={outside_tax_strategy_from_meta} ot_choices={len(outside_tax_choices)}, balance_fill={balance_fill_strategy_from_meta} bf_choices={len(balance_fill_choices)}")
             print(f"[GUI] 実行: {' '.join(cmd)}")
 
             result = subprocess.run(
@@ -1229,6 +1318,9 @@ class Handler(BaseHTTPRequestHandler):
             # 課売返振替結果抽出
             kauuri_rebate_results = extract_kauuri_rebate_results(result.stderr)
 
+            # 対象外+税額補正結果抽出
+            outside_tax_results = extract_outside_tax_results(result.stderr)
+
             # 借貸補完結果抽出
             balance_fill_results = extract_balance_fill_results(result.stderr)
 
@@ -1239,7 +1331,8 @@ class Handler(BaseHTTPRequestHandler):
             outputs = collect_output_files(str(output_dir), partners_prefix)
 
             # サマリ
-            summary = build_summary(outputs, audit, balance_fill_results=balance_fill_results)
+            summary = build_summary(outputs, audit, balance_fill_results=balance_fill_results,
+                                    outside_tax_results=outside_tax_results)
 
             # Suggestion-6: SLIP_DETAILS_JSON 行を history に含めない (slipDetails は別キー保存済)
             stderr_for_history = "\n".join(
@@ -1257,6 +1350,7 @@ class Handler(BaseHTTPRequestHandler):
                 "dedupAudit": dedup_audit,
                 "nonTaxableResults": non_taxable_results,
                 "kauuriRebateResults": kauuri_rebate_results,
+                "outsideTaxResults": outside_tax_results,
                 "balanceFillResults": balance_fill_results,
                 "slipDetails": slip_details,
             }

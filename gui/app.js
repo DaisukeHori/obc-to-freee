@@ -17,6 +17,8 @@ const state = {
   kauuriChoices: {},       // {"<slip_no>_<date>_<側>": {action: "auto-rebate"|"keep", kamoku?: string}}
   balanceFillMismatches: [],// 検出された借貸不一致伝票 [{slip_no, date, dr_total, cr_total, diff}]
   balanceFillChoices: {},  // {"<伝票No>": {action: "auto-fill"|"skip"|"keep"}}
+  outsideTaxMismatches: [],// 検出された対象外+税額矛盾 [{slip_no, date, side, kamoku, amount, tax_amount, summary}]
+  outsideTaxChoices: {},   // {"<slip_no>_<側>": {action: "zero-tax"|"skip"|"keep"}}
   slipDetails: {},         // 元伝票詳細 {"伝票No": [{drKamoku, drAmount, ...}]}
 };
 
@@ -29,10 +31,12 @@ let _guiDedupModalData = null;   // { duplicates }
 let _guiNontaxModalData = null;  // mismatches array
 let _guiKauuriModalData = null;  // mismatches array
 let _guiBfModalData = null;      // balance-fill mismatches array
+let _guiOtModalData = null;      // outside-tax mismatches array
 let _guiDedupCopyVisible = false;
 let _guiNontaxCopyVisible = false;
 let _guiKauuriCopyVisible = false;
 let _guiBfCopyVisible = false;
+let _guiOtCopyVisible = false;
 
 // ============================================================
 // Toast helper
@@ -127,7 +131,7 @@ async function apiUploadAndDetect(formData) {
   return await res.json();
 }
 
-async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoices, kauuriChoices, balanceFillChoices) {
+async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoices, kauuriChoices, balanceFillChoices, outsideTaxChoices) {
   const res = await fetch(BASE + '/api/convert-with-choices', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -137,6 +141,7 @@ async function apiConvertWithChoices(uploadToken, dedupChoices, nonTaxableChoice
       nonTaxableChoices: nonTaxableChoices || {},
       kauuriChoices: kauuriChoices || {},
       balanceFillChoices: balanceFillChoices || {},
+      outsideTaxChoices: outsideTaxChoices || {},
     }),
   });
   if (!res.ok) {
@@ -288,6 +293,10 @@ function applySettingsToForm(s) {
   if (s.partnersPrefix  !== undefined) document.getElementById('partners-prefix').value = s.partnersPrefix;
   if (s.encoding        !== undefined) document.getElementById('encoding').value         = s.encoding;
   if (s.dedupStrategy   !== undefined) document.getElementById('dedup-strategy').value   = s.dedupStrategy;
+  if (s.outsideTaxStrategy !== undefined) {
+    const el = document.getElementById('outside-tax-strategy');
+    if (el) el.value = s.outsideTaxStrategy;
+  }
   if (s.nonTaxableStrategy !== undefined) {
     const el = document.getElementById('non-taxable-strategy');
     if (el) el.value = s.nonTaxableStrategy;
@@ -311,6 +320,7 @@ function applySettingsToForm(s) {
 }
 
 function collectFormValues() {
+  const otEl    = document.getElementById('outside-tax-strategy');
   const ntEl    = document.getElementById('non-taxable-strategy');
   const krEl    = document.getElementById('kauuri-rebate-strategy');
   const krKEl   = document.getElementById('kauuri-rebate-kamoku');
@@ -333,6 +343,7 @@ function collectFormValues() {
     partnersPrefix: document.getElementById('partners-prefix').value.trim(),
     encoding:       document.getElementById('encoding').value,
     dedupStrategy:  document.getElementById('dedup-strategy').value,
+    outsideTaxStrategy: otEl ? otEl.value : 'zero-tax',
     nonTaxableStrategy: ntEl ? ntEl.value : 'change-to-taxable',
     kauuriRebateStrategy: krEl ? krEl.value : 'warn-only',
     kauuriRebateKamoku,
@@ -456,12 +467,13 @@ async function saveSettings() {
 async function executeConvert() {
   const opts = collectFormValues();
 
-  // custom 戦略: dedup / 非課税 / 課売返 / 借貸補完 のいずれかが custom なら upload-and-detect → モーダル表示
+  // custom 戦略: dedup / 非課税 / 課売返 / 借貸補完 / 対象外税額 のいずれかが custom なら upload-and-detect → モーダル表示
   const dedupCustom = opts.outputPartners && opts.dedupStrategy === 'custom';
   const nonTaxableCustom = opts.nonTaxableStrategy === 'custom';
   const kauuriCustom = opts.kauuriRebateStrategy === 'custom';
   const balanceFillCustom = opts.balanceFillStrategy === 'custom';
-  if (dedupCustom || nonTaxableCustom || kauuriCustom || balanceFillCustom) {
+  const outsideTaxCustom = opts.outsideTaxStrategy === 'custom';
+  if (dedupCustom || nonTaxableCustom || kauuriCustom || balanceFillCustom || outsideTaxCustom) {
     await executeConvertCustomFlow(opts);
     return;
   }
@@ -498,6 +510,7 @@ function buildFormData(opts) {
   formData.append('partnersPrefix', opts.partnersPrefix);
   formData.append('encoding',       opts.encoding);
   formData.append('dedupStrategy',  opts.dedupStrategy || 'warn-only');
+  formData.append('outsideTaxStrategy', opts.outsideTaxStrategy || 'zero-tax');
   formData.append('nonTaxableStrategy', opts.nonTaxableStrategy || 'change-to-taxable');
   formData.append('kauuriRebateStrategy', opts.kauuriRebateStrategy || 'warn-only');
   formData.append('kauuriRebateKamoku',   opts.kauuriRebateKamoku   || '売上値引高');
@@ -540,13 +553,16 @@ async function executeConvertCustomFlow(opts) {
   state.nonTaxableChoices = {};
   state.kauuriMismatches = detectResult.kauuriMismatches || [];
   state.kauuriChoices = {};
+  state.outsideTaxMismatches = detectResult.outsideTaxMismatches || [];
+  state.outsideTaxChoices = {};
   state.balanceFillMismatches = detectResult.balanceFillMismatches || [];
   state.balanceFillChoices = {};
 
-  // モーダル順次フロー: dedup (取引先) → non-taxable (非課税) → kauuri (課売返) → balance-fill → 実行
+  // モーダル順次フロー: dedup → non-taxable → kauuri → outside-tax → balance-fill → 実行
   const needDedupModal = opts.outputPartners && opts.dedupStrategy === 'custom' && state.duplicates.length > 0;
   const needNonTaxableModal = opts.nonTaxableStrategy === 'custom' && state.nonTaxableMismatches.length > 0;
   const needKauuriModal = opts.kauuriRebateStrategy === 'custom' && state.kauuriMismatches.length > 0;
+  const needOutsideTaxModal = opts.outsideTaxStrategy === 'custom' && state.outsideTaxMismatches.length > 0;
   const needBalanceFillModal = opts.balanceFillStrategy === 'custom' && state.balanceFillMismatches.length > 0;
 
   // 最後のステップ実行関数
@@ -559,18 +575,27 @@ async function executeConvertCustomFlow(opts) {
     }
   }
 
-  async function proceedToKauuriOrNext() {
-    if (needKauuriModal) {
+  async function proceedToOutsideTaxOrNext() {
+    if (needOutsideTaxModal) {
       goToStep(2);
-      openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku);
+      openOutsideTaxModal(state.outsideTaxMismatches, { onAccept: proceedToBalanceFillOrExecute });
     } else {
       await proceedToBalanceFillOrExecute();
     }
   }
 
+  async function proceedToKauuriOrNext() {
+    if (needKauuriModal) {
+      goToStep(2);
+      openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku, { onAccept: proceedToOutsideTaxOrNext });
+    } else {
+      await proceedToOutsideTaxOrNext();
+    }
+  }
+
   if (needDedupModal) {
     goToStep(2);
-    // dedup モーダル決定後に非課税モーダル or kauuri or balance-fill or 実行へ進む
+    // dedup モーダル決定後に非課税モーダル or kauuri or outside-tax or balance-fill or 実行へ進む
     openDedupModal(state.duplicates, {
       onAccept: async () => {
         if (needNonTaxableModal) {
@@ -589,7 +614,12 @@ async function executeConvertCustomFlow(opts) {
   }
   if (needKauuriModal) {
     goToStep(2);
-    openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku);
+    openKauuriModal(state.kauuriMismatches, opts.kauuriRebateKamoku, { onAccept: proceedToOutsideTaxOrNext });
+    return;
+  }
+  if (needOutsideTaxModal) {
+    goToStep(2);
+    openOutsideTaxModal(state.outsideTaxMismatches, { onAccept: proceedToBalanceFillOrExecute });
     return;
   }
   if (needBalanceFillModal) {
@@ -610,7 +640,8 @@ async function runConvertWithChoices() {
       state.dedupChoices,
       state.nonTaxableChoices,
       state.kauuriChoices || {},
-      state.balanceFillChoices || {}
+      state.balanceFillChoices || {},
+      state.outsideTaxChoices || {}
     );
     state.result = result;
     showLoading(false);
@@ -1029,7 +1060,7 @@ const GUI_KAMOKU_OPTIONS = [
   { label: 'カスタム入力', value: '__custom__' },
 ];
 
-function openKauuriModal(mismatches, defaultKamoku) {
+function openKauuriModal(mismatches, defaultKamoku, options) {
   const modal = document.getElementById('kauuri-modal');
   const desc = document.getElementById('kauuri-modal-desc');
   const container = document.getElementById('kauuri-cards-container');
@@ -1049,6 +1080,9 @@ function openKauuriModal(mismatches, defaultKamoku) {
   const copyTa   = document.getElementById('kauuri-modal-copy-ta');
   if (copyArea) copyArea.style.display = 'none';
   if (copyTa) copyTa.value = '';
+
+  // onAccept コールバック
+  state._kauuriOnAccept = options && options.onAccept ? options.onAccept : null;
 
   modal.style.display = 'flex';
 }
@@ -1184,6 +1218,16 @@ function initKauuriModal() {
     try {
       modal.style.display = 'none';
       state.kauuriChoices = collectKauuriChoices();
+
+      // onAccept コールバックがあれば呼ぶ (次の outside-tax モーダル or balance-fill or 実行)
+      if (state._kauuriOnAccept) {
+        const cb = state._kauuriOnAccept;
+        state._kauuriOnAccept = null;
+        await cb();
+        return;
+      }
+
+      // フォールバック: 直接実行
       await runConvertWithChoices();
     } finally {
       btnExecute.disabled = false;
@@ -1327,6 +1371,356 @@ function initBalanceFillModal() {
   });
 }
 
+// ============================================================
+// Outside-tax mismatch modal (対象外+税額 custom 戦略)
+// ============================================================
+function openOutsideTaxModal(mismatches, options) {
+  const modal = document.getElementById('outside-tax-modal');
+  const desc = document.getElementById('ot-modal-desc');
+  const container = document.getElementById('ot-cards-container');
+
+  desc.textContent = `税区分「対象外」なのに税額がある行が ${mismatches.length} 件見つかりました。各行の対処方法を選んでください。`;
+
+  container.innerHTML = '';
+  mismatches.forEach((m, i) => {
+    const card = buildOutsideTaxCard(m, i);
+    container.appendChild(card);
+  });
+
+  // キャッシュ保存 + コピーエリアリセット
+  _guiOtModalData = mismatches;
+  _guiOtCopyVisible = false;
+  const copyArea = document.getElementById('ot-modal-copy-area');
+  const copyTa   = document.getElementById('ot-modal-copy-ta');
+  if (copyArea) copyArea.style.display = 'none';
+  if (copyTa) copyTa.value = '';
+
+  // onAccept コールバック
+  state._otOnAccept = options && options.onAccept ? options.onAccept : null;
+
+  modal.style.display = 'flex';
+}
+
+function buildOutsideTaxCard(m, idx) {
+  const card = document.createElement('div');
+  card.className = 'dedup-card';
+  card.dataset.key = `${m.slip_no}_${m.side}`;
+
+  const radioName = CSS.escape(`ot_${idx}`);
+  const summaryShort = (m.summary || '').slice(0, 30);
+
+  card.innerHTML = `
+    <div class="dedup-card-header">
+      <strong>伝票 No.${escHtml(m.slip_no)}</strong> <span style="color:#666">(${escHtml(m.date)}) ${escHtml(m.side)}</span>
+    </div>
+    <div class="dedup-card-codes" style="margin:8px 0; font-size:14px; color:#555">
+      税区分: <strong>対象外</strong> / 本体 ${(m.amount||0).toLocaleString()} / 税額 <strong style="color:#dc2626">${(m.tax_amount||0).toLocaleString()}</strong><br>
+      勘定科目: ${escHtml(m.kamoku||'')} / 摘要: ${escHtml(summaryShort)}
+    </div>
+    <div class="dedup-card-options" style="display:flex; flex-direction:column; gap:6px; margin-top:8px">
+      <label><input type="radio" name="ot_${idx}" value="zero-tax" checked> 税額を 0 に強制 (推奨・freee エラー回避)</label>
+      <label><input type="radio" name="ot_${idx}" value="skip"> この伝票を除外 (変換しない)</label>
+      <label><input type="radio" name="ot_${idx}" value="keep"> そのまま (freee エラー継続)</label>
+    </div>
+  `;
+  return card;
+}
+
+function collectOutsideTaxChoices() {
+  const result = {};
+  const cards = document.querySelectorAll('#ot-cards-container .dedup-card');
+  cards.forEach(card => {
+    const key = card.dataset.key;
+    const checked = card.querySelector('input[type=radio]:checked');
+    if (key && checked) {
+      result[key] = { action: checked.value };
+    }
+  });
+  return result;
+}
+
+function initOutsideTaxModal() {
+  const modal = document.getElementById('outside-tax-modal');
+  const btnCancel  = document.getElementById('btn-ot-cancel');
+  const btnExecute = document.getElementById('btn-ot-execute');
+  const btnAutoAll = document.getElementById('btn-ot-auto-all');
+  const btnDlCsv   = document.getElementById('btn-ot-dl-csv');
+  const btnCopy    = document.getElementById('btn-ot-copy');
+
+  if (!modal) return;
+
+  // CSV ダウンロード
+  if (btnDlCsv) {
+    btnDlCsv.addEventListener('click', () => {
+      if (!_guiOtModalData) return;
+      const csv = guiBuildOutsideTaxModalCsv(_guiOtModalData);
+      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `対象外税額一覧_${today}.csv`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+  }
+
+  // コピー用テキスト表示
+  if (btnCopy) {
+    btnCopy.addEventListener('click', () => {
+      if (!_guiOtModalData) return;
+      _guiOtCopyVisible = !_guiOtCopyVisible;
+      const area = document.getElementById('ot-modal-copy-area');
+      const ta   = document.getElementById('ot-modal-copy-ta');
+      if (area) area.style.display = _guiOtCopyVisible ? 'block' : 'none';
+      if (_guiOtCopyVisible && ta) {
+        if (!ta.value) ta.value = guiBuildOutsideTaxModalTabText(_guiOtModalData);
+        ta.select();
+      }
+    });
+  }
+
+  btnCancel.addEventListener('click', () => {
+    modal.style.display = 'none';
+    goToStep(2);
+  });
+
+  btnAutoAll.addEventListener('click', () => {
+    const cards = document.querySelectorAll('#ot-cards-container .dedup-card');
+    cards.forEach(card => {
+      const radio = card.querySelector('input[value="zero-tax"]');
+      if (radio) radio.checked = true;
+    });
+    showToast('全件「税額を0に強制」を設定しました', 'success');
+  });
+
+  btnExecute.addEventListener('click', async () => {
+    btnExecute.disabled = true;
+    try {
+      modal.style.display = 'none';
+      state.outsideTaxChoices = collectOutsideTaxChoices();
+
+      // onAccept コールバックがあれば呼ぶ (次の balance-fill or 実行)
+      if (state._otOnAccept) {
+        const cb = state._otOnAccept;
+        state._otOnAccept = null;
+        await cb();
+        return;
+      }
+
+      // フォールバック: 直接実行
+      await runConvertWithChoices();
+    } finally {
+      btnExecute.disabled = false;
+    }
+  });
+}
+
+function guiBuildOutsideTaxModalCsv(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '摘要'];
+  const lines = [headers.join(',')];
+  (mismatches || []).forEach(m => {
+    const cells = [
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '',
+      m.amount == null ? '' : String(m.amount),
+      m.tax_amount == null ? '' : String(m.tax_amount),
+      m.summary || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function guiBuildOutsideTaxModalTabText(mismatches) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '金額', '税額', '摘要'];
+  const lines = [headers.join('\t')];
+  (mismatches || []).forEach(m => {
+    lines.push([
+      m.slip_no || '', m.date || '', m.side || '',
+      m.kamoku || '',
+      m.amount == null ? '' : String(m.amount),
+      m.tax_amount == null ? '' : String(m.tax_amount),
+      m.summary || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
+function renderOutsideTaxResultsSection(results, outputs) {
+  const existing = document.getElementById('outside-tax-result-section');
+  if (existing) existing.remove();
+  if (!results || results.length === 0) return;
+
+  const firstOutput = outputs && outputs.length > 0 ? outputs[0].filename : '';
+  const baseName = firstOutput.replace(/\.[^.]+$/, '') || '変換結果';
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const csvFilename = `対象外税額補正結果_${baseName}_${today}.csv`;
+
+  const section = document.createElement('div');
+  section.id = 'outside-tax-result-section';
+  section.className = 'card dedup-result-section';
+
+  const titleItem = document.createElement('div');
+  titleItem.className = 'audit-item';
+
+  const header = document.createElement('div');
+  header.className = 'audit-item-header';
+  const zeroed  = results.filter(e => e.action === 'zero-tax').length;
+  const skipped = results.filter(e => e.action === 'skip').length;
+  const kept    = results.filter(e => e.action === 'keep' || !e.action).length;
+  header.innerHTML = `
+    <span class="audit-item-title">対象外+税額補正結果</span>
+    <span class="audit-badge" style="background:#fef3c7;color:#b45309;">${results.length} 件 (税額0化: ${zeroed} / 除外: ${skipped} / 維持: ${kept})</span>
+    <svg style="width:16px;height:16px;color:var(--gray-400);flex-shrink:0;transition:transform 0.2s" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <polyline points="6 9 12 15 18 9"/>
+    </svg>`;
+
+  const body = document.createElement('div');
+  body.className = 'audit-item-body open';
+
+  // ダウンロード + コピーボタン行
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+
+  const btnDl = document.createElement('a');
+  btnDl.className = 'btn btn-success btn-sm';
+  btnDl.style.cssText = 'padding:6px 14px;font-size:13px;cursor:pointer;';
+  btnDl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </svg>CSVダウンロード`;
+  btnDl.setAttribute('download', csvFilename);
+  btnDl.addEventListener('click', (e) => {
+    e.preventDefault();
+    const csvContent = buildOutsideTaxCsv(results);
+    const blob = new Blob(['﻿' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn btn-ghost btn-sm';
+  btnCopy.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnCopy.textContent = 'テキストエリアを開く / 閉じる';
+  let taVisible = false;
+  const ta = document.createElement('textarea');
+  ta.readOnly = true;
+  ta.rows = 8;
+  ta.style.cssText = 'width:100%;font-size:12px;font-family:monospace;margin-top:8px;display:none;resize:vertical;';
+  ta.value = buildOutsideTaxTabText(results);
+  btnCopy.addEventListener('click', () => {
+    taVisible = !taVisible;
+    ta.style.display = taVisible ? 'block' : 'none';
+    if (taVisible) ta.select();
+  });
+
+  btnRow.appendChild(btnDl);
+  btnRow.appendChild(btnCopy);
+  body.appendChild(btnRow);
+  body.appendChild(ta);
+
+  // テーブル
+  const table = document.createElement('table');
+  table.innerHTML = `
+    <thead><tr>
+      <th>伝票No</th><th>日付</th><th>借/貸</th>
+      <th>勘定科目</th><th>元金額</th><th>元税額</th><th>補正後税額</th><th>処理</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+    const actionLabel = {
+      'zero-tax': '税額を0に強制',
+      'skip':     '伝票除外',
+      'keep':     'そのまま(警告のみ)',
+    }[row.action] || (row.action || '');
+    const actionColor = row.action === 'zero-tax' ? '#2563eb' : row.action === 'skip' ? '#dc2626' : '#6b7280';
+    const correctedTax = row.action === 'zero-tax' ? 0 : (row.action === 'skip' ? '-' : row.tax_amount);
+    tr.innerHTML = `
+      <td>${escHtml(row.slip_no || '')}</td>
+      <td>${escHtml(row.date || '')}</td>
+      <td>${escHtml(row.side || '')}</td>
+      <td>${escHtml(row.kamoku || '')}</td>
+      <td style="text-align:right">${(row.amount||0).toLocaleString()}</td>
+      <td style="text-align:right;color:#dc2626">${(row.tax_amount||0).toLocaleString()}</td>
+      <td style="text-align:right;color:${row.action==='zero-tax'?'#2563eb':'#374151'}">${correctedTax === '-' ? '-' : Number(correctedTax).toLocaleString()}</td>
+      <td style="color:${actionColor}">${escHtml(actionLabel)}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  body.appendChild(table);
+
+  // toggle
+  const chevron = header.querySelector('svg');
+  header.addEventListener('click', () => {
+    const open = body.classList.toggle('open');
+    chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+  });
+  chevron.style.transform = 'rotate(180deg)'; // 初期展開状態
+
+  titleItem.appendChild(header);
+  titleItem.appendChild(body);
+  section.appendChild(titleItem);
+
+  // kauuri-rebate-result-section → dedup-result-section → audit-section の後に挿入
+  const kauuriSection  = document.getElementById('kauuri-rebate-result-section');
+  const dedupSection   = document.getElementById('dedup-result-section');
+  const auditSection   = document.getElementById('audit-section');
+  const anchor = kauuriSection || dedupSection || auditSection;
+  if (anchor) {
+    anchor.parentNode.insertBefore(section, anchor.nextSibling);
+  } else {
+    document.getElementById('result-success').appendChild(section);
+  }
+}
+
+function buildOutsideTaxCsv(results) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '元金額', '元税額', '補正後税額', '処理', '摘要'];
+  const actionLabel = { 'zero-tax': '税額を0に強制', 'skip': '伝票除外', 'keep': 'そのまま(警告のみ)' };
+  const lines = [headers.join(',')];
+  (results || []).forEach(row => {
+    const correctedTax = row.action === 'zero-tax' ? '0' : (row.action === 'skip' ? '-' : String(row.tax_amount || ''));
+    const cells = [
+      row.slip_no    || '',
+      row.date       || '',
+      row.side       || '',
+      row.kamoku     || '',
+      row.amount     != null ? String(row.amount)     : '',
+      row.tax_amount != null ? String(row.tax_amount) : '',
+      correctedTax,
+      actionLabel[row.action] || row.action || '',
+      row.summary    || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildOutsideTaxTabText(results) {
+  const headers = ['伝票No', '日付', '借/貸', '勘定科目', '元金額', '元税額', '補正後税額', '処理', '摘要'];
+  const actionLabel = { 'zero-tax': '税額を0に強制', 'skip': '伝票除外', 'keep': 'そのまま(警告のみ)' };
+  const lines = [headers.join('\t')];
+  (results || []).forEach(row => {
+    const correctedTax = row.action === 'zero-tax' ? '0' : (row.action === 'skip' ? '-' : String(row.tax_amount || ''));
+    lines.push([
+      row.slip_no    || '',
+      row.date       || '',
+      row.side       || '',
+      row.kamoku     || '',
+      row.amount     != null ? String(row.amount)     : '',
+      row.tax_amount != null ? String(row.tax_amount) : '',
+      correctedTax,
+      actionLabel[row.action] || row.action || '',
+      row.summary    || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
 function showLoading(on) {
   document.getElementById('result-loading').style.display = on ? 'block' : 'none';
   document.getElementById('result-success').style.display = 'none';
@@ -1407,6 +1801,11 @@ function renderResultSuccess(r) {
   // Kauuri rebate results section
   if (r.kauuriRebateResults && r.kauuriRebateResults.length > 0) {
     renderKauuriRebateResultsSection(r.kauuriRebateResults, r.outputs);
+  }
+
+  // Outside-tax results section
+  if (r.outsideTaxResults && r.outsideTaxResults.length > 0) {
+    renderOutsideTaxResultsSection(r.outsideTaxResults, r.outputs);
   }
 
   // Non-taxable results section
@@ -2490,6 +2889,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   initDedupModal();
   initNonTaxableModal();
   initKauuriModal();
+  initOutsideTaxModal();
   initBalanceFillModal();
   initRestart();
 
