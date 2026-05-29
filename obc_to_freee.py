@@ -2525,13 +2525,30 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
         except OSError as e:
             print(f"WARN: 監査用ファイル読み込み失敗: {fpath}: {e}", file=sys.stderr)
 
-    # --- 不一致伝票の抽出 ---
+    # --- balance fill 済み (slip_no, date) セットを構築 ---
+    # auto-fill または skip 済み伝票のみ監査警告から除外する
+    # keep 伝票は補完されていないため警告に残す
+    balance_filled_keys: set = set()
+    if balance_fill_log:
+        for entry in balance_fill_log:
+            if entry.get("action") in ("auto-fill", "skip"):
+                _sn = entry.get("slip_no", "")
+                _dt = entry.get("date", "")
+                if _sn:
+                    balance_filled_keys.add((_sn, _dt))
+
+    # --- 不一致伝票の抽出 (balance fill 済みを除外) ---
     mismatch_slips = []
     for key in sorted(slip_dr.keys()):
         dr = slip_dr[key]
         cr = slip_cr[key]
         if dr != cr:
-            mismatch_slips.append((key[1], slip_date[key], dr, cr))  # (slip_no, date, dr, cr)
+            slip_no_val = key[1]
+            date_val = slip_date[key]
+            # Warning-2: balance fill 済みは[要確認] から除外
+            if (slip_no_val, date_val) in balance_filled_keys:
+                continue
+            mismatch_slips.append((slip_no_val, date_val, dr, cr))  # (slip_no, date, dr, cr)
 
     # --- stderr 出力 ---
     sep = "=" * 70
@@ -2637,42 +2654,8 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     print("   「非課売上区分」と業務確認用の両方に同じ伝票番号が表示されます。", file=sys.stderr)
     print(sep, file=sys.stderr)
 
-    # --- [要確認] 借貸不一致補完セクション ---
-    if balance_fill_log:
-        print("", file=sys.stderr)
-        print(sep, file=sys.stderr)
-        print("[要確認] 借貸不一致補完 (OBC原本欠陥伝票への補完行追加)", file=sys.stderr)
-        print(sep, file=sys.stderr)
-        print("以下の伝票は OBC 原本時点で借方合計 ≠ 貸方合計でした。", file=sys.stderr)
-        print("freee インポート後の借貸整合のため、補完行が自動追加されました。", file=sys.stderr)
-        print("補完行の勘定科目・金額を経理担当が確認し、必要に応じて freee で修正してください。", file=sys.stderr)
-        print("", file=sys.stderr)
-        for entry in balance_fill_log:
-            action = entry.get("action", "")
-            slip_no = entry.get("slip_no", "")
-            date_str = entry.get("date", "")
-            dr_t = entry.get("dr_total", 0)
-            cr_t = entry.get("cr_total", 0)
-            diff = entry.get("diff", 0)
-            fill_side = entry.get("fill_side", "")
-            fill_amount = entry.get("fill_amount", 0)
-            fill_kamoku = entry.get("fill_kamoku", "")
-            sign = "+" if diff >= 0 else ""
-            if action == "auto-fill":
-                print(
-                    f"  No. {slip_no} ({date_str}) 借方{dr_t:,}/貸方{cr_t:,}/差{sign}{diff:,} "
-                    f"→ {fill_side}に {fill_amount:,}円 ({fill_kamoku}) 補完",
-                    file=sys.stderr,
-                )
-            elif action == "skip":
-                print(f"  No. {slip_no} ({date_str}) → 除外 (不一致: 差{sign}{diff:,})", file=sys.stderr)
-            elif action == "keep":
-                print(f"  No. {slip_no} ({date_str}) → 維持 (不一致: 差{sign}{diff:,})", file=sys.stderr)
-        filled = sum(1 for e in balance_fill_log if e.get("action") == "auto-fill")
-        skipped = sum(1 for e in balance_fill_log if e.get("action") == "skip")
-        kept = sum(1 for e in balance_fill_log if e.get("action") == "keep")
-        print(f"  合計 {len(balance_fill_log)} 件 (補完: {filled} / 除外: {skipped} / 維持: {kept})", file=sys.stderr)
-        print(sep, file=sys.stderr)
+    # [要確認] 借貸不一致補完セクションは削除 (Step3「借貸補完結果」セクションに集約済み)
+    # 補完済み伝票は上記 balance_filled_keys で「奉行原本の借貸不一致伝票」から除外済み
 
 
 # ---------------------------------------------------------------------------
