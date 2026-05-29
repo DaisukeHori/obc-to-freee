@@ -254,6 +254,147 @@
     .main { margin-left: 0; padding: 16px; }
     .form-row { flex-direction: column; }
   }
+
+  /* =====================================================
+     Tutorial Overlay
+     ===================================================== */
+  #tutorial-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: auto;
+  }
+  /* 半透明黒マスク (SVG clip-path で対象要素に穴を開ける場合の代替: box-shadow trick) */
+  #tutorial-highlight-box {
+    position: fixed;
+    z-index: 9998;
+    border-radius: 6px;
+    outline: 3px solid #3b82f6;
+    outline-offset: 3px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,0.62);
+    pointer-events: none;
+    transition: top 0.25s, left 0.25s, width 0.25s, height 0.25s;
+  }
+  /* overlay 背景 (target なし時のフルマスク) */
+  #tutorial-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.62);
+    z-index: 9997;
+    pointer-events: auto;
+  }
+  /* ツールチップ本体 */
+  #tutorial-tooltip {
+    position: fixed;
+    z-index: 10000;
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.28);
+    padding: 22px 24px 18px;
+    max-width: 400px;
+    width: min(400px, calc(100vw - 32px));
+    pointer-events: auto;
+    animation: tutFadeIn 0.18s ease;
+  }
+  @keyframes tutFadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  #tutorial-tooltip .tut-step-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  #tutorial-tooltip .tut-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #111827;
+    margin-bottom: 10px;
+    line-height: 1.35;
+  }
+  #tutorial-tooltip .tut-content {
+    font-size: 13px;
+    color: #374151;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    margin-bottom: 16px;
+  }
+  #tutorial-tooltip .tut-content strong {
+    font-weight: 700;
+    color: #111827;
+  }
+  #tutorial-tooltip .tut-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  #tutorial-tooltip .tut-btn {
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: background 0.12s;
+  }
+  #tutorial-tooltip .tut-btn-primary {
+    background: #2563eb;
+    color: white;
+  }
+  #tutorial-tooltip .tut-btn-primary:hover { background: #1d4ed8; }
+  #tutorial-tooltip .tut-btn-secondary {
+    background: #f3f4f6;
+    color: #374151;
+    border: 1px solid #d1d5db;
+  }
+  #tutorial-tooltip .tut-btn-secondary:hover { background: #e5e7eb; }
+  #tutorial-tooltip .tut-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  #tutorial-tooltip .tut-progress-bar {
+    flex: 1;
+    height: 4px;
+    background: #e5e7eb;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  #tutorial-tooltip .tut-progress-fill {
+    height: 100%;
+    background: #3b82f6;
+    border-radius: 2px;
+    transition: width 0.25s;
+  }
+  #tutorial-tooltip .tut-progress-text {
+    font-size: 11px;
+    color: #9ca3af;
+    white-space: nowrap;
+  }
+  /* 吹き出し三角 */
+  #tutorial-tooltip .tut-arrow {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: white;
+    transform: rotate(45deg);
+    box-shadow: -1px -1px 3px rgba(0,0,0,0.06);
+  }
+  .tut-arrow-top    { top: -6px; }
+  .tut-arrow-bottom { bottom: -6px; }
+  .tut-arrow-left   { left: 20px; }
+  .tut-arrow-right  { right: 20px; }
+  .tut-arrow-center { left: 50%; transform: translateX(-50%) rotate(45deg); }
+  @media (max-width: 480px) {
+    #tutorial-tooltip { padding: 16px 16px 14px; }
+    #tutorial-tooltip .tut-title { font-size: 14px; }
+    #tutorial-tooltip .tut-content { font-size: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -500,6 +641,10 @@
           <li>借貸整合性チェック・監査ログ</li>
         </ul>
         <p style="font-size:11px; color:var(--gray-400); margin-top:16px;">Python版 obc_to_freee.py を完全移植。</p>
+        <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--gray-200);">
+          <p style="font-size:13px; color:var(--gray-700); margin-bottom:10px;">初めてお使いの方へ — 使い方ガイドをご覧ください:</p>
+          <button class="btn btn-primary" onclick="tutorialRestart()">▶ チュートリアルを再生</button>
+        </div>
       </div>
     </div>
 
@@ -629,6 +774,23 @@
         <button class="btn btn-primary" onclick="outsideTaxConfirm()">次へ (確定)</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Tutorial overlay -->
+<div id="tutorial-bg" style="display:none;"></div>
+<div id="tutorial-highlight-box" style="display:none;"></div>
+<div id="tutorial-overlay" style="display:none;">
+  <div id="tutorial-tooltip">
+    <div class="tut-step-label" id="tut-step-label"></div>
+    <div class="tut-progress">
+      <div class="tut-progress-bar"><div class="tut-progress-fill" id="tut-progress-fill"></div></div>
+      <div class="tut-progress-text" id="tut-progress-text"></div>
+    </div>
+    <div class="tut-title" id="tut-title"></div>
+    <div class="tut-content" id="tut-content"></div>
+    <div class="tut-buttons" id="tut-buttons"></div>
+    <div class="tut-arrow" id="tut-arrow"></div>
   </div>
 </div>
 
@@ -4567,7 +4729,308 @@ document.getElementById('file-input').addEventListener('change', e => {
   e.target.value = '';
 });
 
+// ===========================================================================
+// チュートリアル
+// ===========================================================================
+
+const tutorialSteps = [
+  {
+    target: null,
+    title: "ようこそ、奉行→freee 変換ツールへ",
+    content: "このツールは勘定奉行から書き出した CSV を、freee がそのまま取込める形式に変換します。\n\n5 分のチュートリアルで使い方を覚えましょう。慣れたユーザーはスキップして OK です。",
+    buttons: [{label: "はじめる", action: "next", primary: true}, {label: "スキップ", action: "skip"}]
+  },
+  {
+    target: null,
+    title: "何をするツール?",
+    content: "奉行→freee の翻訳機です。\n\n奉行と freee は仕訳の書き方ルールが微妙に違います。例えば\n・奉行の「複合」科目 → freee には存在しないので別形式に変換\n・奉行の「非仕入」 → freee の「非対仕入」に正しく対応\n・仮受消費税の自動補完\n\nこのツールが全部自動でやります。\n\n変換時に「freee で取込エラーになりそうな箇所」を検出して自動補正するチェック機能付きです。"
+  },
+  {
+    target: "#drop-zone",
+    title: "CSV を選ぶ",
+    content: "ここをクリック（またはドラッグ＆ドロップ）して奉行から書き出した CSV を選んでください。\n\n対応形式:\n・CP932 / Shift-JIS（奉行の標準）\n・UTF-8 / UTF-8-BOM\n\n複数ファイル選択も OK（期首〜期末で別ファイルになっている場合等）。"
+  },
+  {
+    target: "#section-step2",
+    title: "オプション画面",
+    content: "ファイル選択後、「次へ: オプション設定」をクリックするとここで変換ルールを決めます。\n\n基本はデフォルトのままで OK です。\n\n特殊な仕訳パターンに対しては「対処戦略」を選べます（次のスライドで説明）。"
+  },
+  {
+    target: "#opt-non-taxable-strategy",
+    title: "対処戦略 1/5: 非課税+税額矛盾",
+    content: "奉行で「非売上」と書いてあるのに税額がある仕訳の対処方法。\n\n・デフォルト「警告のみ」: freee がエラーで弾くので手動修正\n・「自動: 課税売上に変更」: 税区分を変更して取込通過\n・「対話: 1件ずつ確認」: モーダルで件別判断"
+  },
+  {
+    target: "#opt-kauuri-rebate-strategy",
+    title: "対処戦略 2/5: 課売上マイナス起票",
+    content: "返品・値引きで奉行が「課税売上 マイナス金額」で書いた仕訳。\n\nfreee では「課税売返10%」と別区分で書くのが正解。\n\nデフォルトは警告のみ。「自動振替」を選ぶと借方移動+符号反転+科目変更を自動実行。"
+  },
+  {
+    target: "#opt-outside-tax-strategy",
+    title: "対処戦略 3/5: 対象外+税額",
+    content: "消費税中間納付の仕訳など、奉行が「対象外」科目に税額を独自記録しているケース。\n\nfreee は「対象外なら税額 0 必須」なのでエラー。\n\nデフォルトで税額を 0 化。申告計算に影響なし（対象外は申告対象外区分）。"
+  },
+  {
+    target: "#opt-balance-fill-strategy",
+    title: "対処戦略 4/5: 借貸不一致",
+    content: "OBC データの不一致伝票を仮受消費税等で自動補完。\n\nデフォルトで「自動補完（仮受消費税）」。\n\n月次売上の集計仕訳でよくある「預かり消費税の独立行が欠落」パターンに対処。"
+  },
+  {
+    target: "#opt-dedup-strategy",
+    title: "対処戦略 5/5: 同名異コード",
+    content: "取引先マスタ生成オプション ON 時に有効。\n\n奉行で同じ取引先名なのに別コードを持つケースの統合戦略。\n\n「最頻使用コードに統合」推奨。「対話: 1件ずつ」で件別判断も可能。"
+  },
+  {
+    target: "#btn-execute",
+    title: "変換実行",
+    content: "クリックで変換開始。1,000 件で数秒、10,000 件でも 1 分以内が目安。\n\n対処戦略で「対話: 1件ずつ」を選んだ場合は、モーダルで件別選択画面が出ます。"
+  },
+  {
+    target: null,
+    title: "結果画面で何ができる?",
+    content: "変換完了後の結果画面では:\n\n📥 CSV ダウンロード: freee 取込用 CSV を取得\n\n📋 監査ログ: 「要確認」「業務確認用」「補完結果」を表示\n\n🔍 伝票No クリック: 元の奉行データの該当伝票全行を表示（モーダル）\n\n📊 対処結果セクション: 各戦略で補完/振替した件数と詳細"
+  },
+  {
+    target: null,
+    title: "ワンポイント: モーダル内 CSV ダウンロード",
+    content: "「対話: 1件ずつ確認」を選ぶと、確認モーダルが開きます。\n\nそのモーダル右上に「📥 CSV」「📋 コピー」ボタンがあり、確定前にデータをエクセル等で検討できます。\n\n本格的なデータ確認は Excel 派の経理担当者に重宝されます。"
+  },
+  {
+    target: ".sidebar-nav",
+    title: "困った時は",
+    content: "左サイドバーから:\n・「freee手順」: freee へのインポート手順\n・「ヒストリ」: 過去の変換履歴\n・「設定」: デフォルト値の保存\n・「About」: ツールの情報\n\nこのチュートリアルは About ページからいつでも再生できます。"
+  },
+  {
+    target: null,
+    title: "チュートリアル完了!",
+    content: "これで使い方は OK です!\n\nまずは奉行 CSV を選んで試してみてください。\n\nもう一度見たい場合は左サイドバー「About」→「チュートリアルを再生」から起動できます。",
+    buttons: [{label: "始めましょう", action: "finish", primary: true}]
+  }
+];
+
+let tutCurrentStep = 0;
+let tutActive = false;
+
+function tutorialStart() {
+  tutCurrentStep = 0;
+  tutActive = true;
+  document.getElementById('tutorial-bg').style.display = '';
+  document.getElementById('tutorial-overlay').style.display = '';
+  tutShowStep(0);
+  document.addEventListener('keydown', tutKeyHandler);
+}
+
+function tutorialEnd(complete) {
+  tutActive = false;
+  document.getElementById('tutorial-bg').style.display = 'none';
+  document.getElementById('tutorial-overlay').style.display = 'none';
+  document.getElementById('tutorial-highlight-box').style.display = 'none';
+  document.removeEventListener('keydown', tutKeyHandler);
+  if (complete) {
+    localStorage.setItem('tutorial_completed', '1');
+  } else {
+    // skip: mark complete too so it doesn't auto-launch again
+    localStorage.setItem('tutorial_completed', '1');
+  }
+}
+
+function tutorialRestart() {
+  localStorage.removeItem('tutorial_completed');
+  // If we're on About page, navigate back to home first
+  showPage('home');
+  setTimeout(() => tutorialStart(), 80);
+}
+
+function tutKeyHandler(e) {
+  if (!tutActive) return;
+  if (e.key === 'Escape') { tutorialEnd(false); }
+  else if (e.key === 'ArrowRight' || e.key === 'Enter') { tutNext(); }
+  else if (e.key === 'ArrowLeft') { tutPrev(); }
+}
+
+function tutNext() {
+  if (tutCurrentStep < tutorialSteps.length - 1) {
+    tutCurrentStep++;
+    tutShowStep(tutCurrentStep);
+  } else {
+    tutorialEnd(true);
+  }
+}
+
+function tutPrev() {
+  if (tutCurrentStep > 0) {
+    tutCurrentStep--;
+    tutShowStep(tutCurrentStep);
+  }
+}
+
+function tutShowStep(idx) {
+  const step = tutorialSteps[idx];
+  const total = tutorialSteps.length;
+
+  // ステップラベル
+  document.getElementById('tut-step-label').textContent = 'STEP ' + (idx + 1) + ' / ' + total;
+
+  // プログレスバー
+  const pct = Math.round(((idx + 1) / total) * 100);
+  document.getElementById('tut-progress-fill').style.width = pct + '%';
+  document.getElementById('tut-progress-text').textContent = pct + '%';
+
+  // タイトル・コンテンツ
+  document.getElementById('tut-title').textContent = step.title;
+  // コンテンツはテキストをHTMLに変換（**bold**対応）
+  const contentEl = document.getElementById('tut-content');
+  contentEl.innerHTML = escHtml(step.content).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // ボタン
+  const btnDef = step.buttons || [
+    ...(idx > 0 ? [{label: "← 戻る", action: "prev", primary: false}] : []),
+    {label: idx < total - 1 ? "次へ →" : "完了", action: idx < total - 1 ? "next" : "finish", primary: true},
+    ...(idx === 0 ? [] : [])
+  ];
+  // スキップボタンを最初のステップ以外でも付与
+  const hasSkip = btnDef.some(b => b.action === 'skip' || b.action === 'finish');
+  const allBtns = [...btnDef];
+  if (!hasSkip && idx > 0) {
+    allBtns.push({label: "スキップ", action: "skip", primary: false});
+  }
+
+  const btnsEl = document.getElementById('tut-buttons');
+  btnsEl.innerHTML = '';
+  allBtns.forEach(b => {
+    const btn = document.createElement('button');
+    btn.className = 'tut-btn ' + (b.primary ? 'tut-btn-primary' : 'tut-btn-secondary');
+    btn.textContent = b.label;
+    btn.addEventListener('click', () => {
+      if (b.action === 'next') tutNext();
+      else if (b.action === 'prev') tutPrev();
+      else if (b.action === 'skip') tutorialEnd(false);
+      else if (b.action === 'finish') tutorialEnd(true);
+    });
+    btnsEl.appendChild(btn);
+  });
+
+  // ターゲット要素のハイライト＆ツールチップ配置
+  const targetSel = step.target;
+  let targetEl = null;
+  if (targetSel) {
+    targetEl = document.querySelector(targetSel);
+    // step2/dedup などは非表示の可能性
+    if (targetEl) {
+      const rect = targetEl.getBoundingClientRect();
+      const isVisible = rect.width > 0 && rect.height > 0 &&
+        rect.bottom > 0 && rect.right > 0 &&
+        rect.top < window.innerHeight && rect.left < window.innerWidth;
+      if (!isVisible) targetEl = null;
+    }
+  }
+
+  const hlBox = document.getElementById('tutorial-highlight-box');
+  const bg = document.getElementById('tutorial-bg');
+
+  if (targetEl) {
+    // スクロールして対象を viewport center に
+    targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // highlight box
+    bg.style.display = 'none'; // box-shadow trick で穴開けするので bg は隠す
+    hlBox.style.display = '';
+    // 少し遅延してrect再取得（scrollIntoView完了後）
+    setTimeout(() => {
+      const r = targetEl.getBoundingClientRect();
+      const pad = 6;
+      hlBox.style.top    = (r.top    - pad) + 'px';
+      hlBox.style.left   = (r.left   - pad) + 'px';
+      hlBox.style.width  = (r.width  + pad * 2) + 'px';
+      hlBox.style.height = (r.height + pad * 2) + 'px';
+      tutPositionTooltip(r, pad);
+    }, 120);
+  } else {
+    // 中央 modal モード
+    hlBox.style.display = 'none';
+    bg.style.display = '';
+    tutPositionCenter();
+  }
+}
+
+function tutPositionTooltip(targetRect, pad) {
+  const tip = document.getElementById('tutorial-tooltip');
+  const arrow = document.getElementById('tut-arrow');
+  const tipW = Math.min(400, window.innerWidth - 32);
+  const tipH = tip.offsetHeight || 280;
+  const vp = { w: window.innerWidth, h: window.innerHeight };
+  const gap = 14; // 要素とtip間の隙間
+
+  // 優先順位: 下→上→右→左
+  let top, left, arrowClass = '';
+
+  const tgt = {
+    top: targetRect.top - pad,
+    bottom: targetRect.bottom + pad,
+    left: targetRect.left - pad,
+    right: targetRect.right + pad,
+    cx: (targetRect.left + targetRect.right) / 2,
+    cy: (targetRect.top + targetRect.bottom) / 2
+  };
+
+  // 下に配置できるか
+  if (tgt.bottom + gap + tipH < vp.h - 16) {
+    top = tgt.bottom + gap;
+    left = Math.max(16, Math.min(tgt.cx - tipW / 2, vp.w - tipW - 16));
+    arrowClass = 'tut-arrow-top tut-arrow-center';
+  }
+  // 上に配置できるか
+  else if (tgt.top - gap - tipH > 16) {
+    top = tgt.top - gap - tipH;
+    left = Math.max(16, Math.min(tgt.cx - tipW / 2, vp.w - tipW - 16));
+    arrowClass = 'tut-arrow-bottom tut-arrow-center';
+  }
+  // 右に配置できるか
+  else if (tgt.right + gap + tipW < vp.w - 16) {
+    left = tgt.right + gap;
+    top = Math.max(16, Math.min(tgt.cy - tipH / 2, vp.h - tipH - 16));
+    arrowClass = 'tut-arrow-left tut-arrow-top';
+  }
+  // 左に配置
+  else {
+    left = Math.max(16, tgt.left - gap - tipW);
+    top = Math.max(16, Math.min(tgt.cy - tipH / 2, vp.h - tipH - 16));
+    arrowClass = 'tut-arrow-right tut-arrow-top';
+  }
+
+  tip.style.top  = Math.max(8, top) + 'px';
+  tip.style.left = Math.max(8, left) + 'px';
+  tip.style.width = tipW + 'px';
+  arrow.className = 'tut-arrow ' + arrowClass;
+}
+
+function tutPositionCenter() {
+  const tip = document.getElementById('tutorial-tooltip');
+  const arrow = document.getElementById('tut-arrow');
+  const tipW = Math.min(400, window.innerWidth - 32);
+  tip.style.width = tipW + 'px';
+  tip.style.left = Math.max(8, (window.innerWidth - tipW) / 2) + 'px';
+  tip.style.top  = Math.max(8, (window.innerHeight - (tip.offsetHeight || 320)) / 2) + 'px';
+  arrow.className = 'tut-arrow';
+  arrow.style.display = 'none';
+}
+
+// 背景クリックでスキップ
+document.getElementById('tutorial-bg').addEventListener('click', () => {
+  if (tutActive) tutorialEnd(false);
+});
+
+// 初回アクセス自動起動
+(function() {
+  if (!localStorage.getItem('tutorial_completed')) {
+    // DOMContentLoaded は既に完了しているので setTimeout で少し待つ
+    setTimeout(() => tutorialStart(), 400);
+  }
+})();
+
+// ===========================================================================
 // 初期化
+// ===========================================================================
 loadSettings();
 </script>
 </body>
