@@ -4730,81 +4730,285 @@ document.getElementById('file-input').addEventListener('change', e => {
 });
 
 // ===========================================================================
-// チュートリアル
+// チュートリアル — サンプル CSV データ
+// ===========================================================================
+
+// 奉行原本形式 (UTF-8) のダミー CSV。各戦略が実演できる最小限データ (11 行)。
+// 列定義: 日付,伝票No.,借方部門名,借方勘定科目名,借方補助科目名,借方税区分略称,借方税率,借方取引先コード,借方取引先名,借方本体金額,借方消費税額,貸方部門名,貸方勘定科目名,貸方補助科目名,貸方税区分略称,貸方税率,貸方取引先コード,貸方取引先名,貸方本体金額,貸方消費税額,摘要
+// (79 列構成の奉行標準エクスポート形式を最小限に絞った版)
+const SAMPLE_CSV = `日付,伝票No.,借方部門名,借方勘定科目名,借方補助科目名,借方税区分略称,借方税率,借方取引先コード,借方取引先名,借方本体金額,借方消費税額,貸方部門名,貸方勘定科目名,貸方補助科目名,貸方税区分略称,貸方税率,貸方取引先コード,貸方取引先名,貸方本体金額,貸方消費税額,摘要
+2024/04/01,000001,営業部,仕入高,,課仕入,10,A001,サンプル商事,100000,10000,経理部,普通預金,みずほ本店,,,,,,110000,通常課税仕入の例
+2024/04/02,000002,営業部,仮払消費税,,非仕入,10,,,5000,500,経理部,現金,,対象外,,,,5500,0,非仕入+税額(TAX_MAP変換例)
+2024/04/03,000003,営業部,売掛金,,課売上,10,B001,デモ物産,-50000,-5000,経理部,売上高,,課売上,10,B001,デモ物産,-50000,-5000,課売上+マイナス(返品)
+2024/04/04,000004,経理部,仮払消費税,,対象外,10,,,3000,500,経理部,普通預金,みずほ本店,,,,,,3500,対象外+税額>0(中間納付)
+2024/04/05,000005,営業部,売上高,,非売上,10,C001,サンプル運輸,20000,2000,経理部,売掛金,,,,,,22000,0,非売上+税額矛盾
+2024/04/06,000006,営業部,売掛金,,課売上,10,D001,東西商事,80000,8000,経理部,売上高,,,,,,88000,0,通常売上
+2024/04/07,000007,経理部,仕入高,,課仕入,10,E001,南北物流,50000,5000,経理部,売掛金,,,,,,55000,0,借貸不一致(仮受消費税欠落)
+2024/04/08,000008,営業部,仕入高,,課仕入,10,F001,山田商店,30000,3000,経理部,普通預金,みずほ本店,,,,,,33000,0,同名取引先コードA: 山田商店
+2024/04/08,000009,営業部,仕入高,,課仕入,10,F002,山田商店,20000,2000,経理部,普通預金,みずほ本店,,,,,,22000,0,同名取引先コードB: 山田商店
+2024/04/09,000010,営業部,仕入高,,課仕入,10,G001,田中物産,15000,1500,経理部,現金,,,,,,16500,0,別取引先(同名異コードなし)
+2024/04/10,000011,営業部,売上高,,非売上,10,H001,イレギュラー社,10000,1000,経理部,売掛金,,,,,,11000,0,非売上+税額矛盾(2件目)`;
+
+// サンプル CSV を File オブジェクト化して既存読込ロジックに流す
+function loadSampleCsv() {
+  const blob = new Blob([SAMPLE_CSV], {type: 'text/csv;charset=utf-8'});
+  const file = new File([blob], 'チュートリアル_サンプルデータ.csv', {type: 'text/csv'});
+  // 既存の選択ファイルをクリアしてサンプルだけにする
+  selectedFiles = [file];
+  renderFileList();
+  document.getElementById('btn-to-step2').disabled = false;
+  // Step2 に進む (設定ロード)
+  if (!step2Initialized) { loadSettings(); step2Initialized = true; }
+  document.getElementById('section-step1').style.display = 'none';
+  document.getElementById('section-step2').style.display = '';
+  document.getElementById('section-step3').style.display = 'none';
+  updateStepIndicator(2);
+  const execBtn = document.getElementById('btn-execute');
+  if (execBtn) execBtn.disabled = false;
+}
+
+// 非課税+税額矛盾 モーダルをサンプルデータで開く
+function showSampleNontaxModal() {
+  const sampleMismatches = [
+    {slip_no: '000005', date: '2024/04/05', side: '借方',
+     tax_label: '非売上', amount: 20000, tax_amount: 2000,
+     summary: '非売上+税額矛盾', kamoku: '売上高'},
+    {slip_no: '000011', date: '2024/04/10', side: '借方',
+     tax_label: '非売上', amount: 10000, tax_amount: 1000,
+     summary: '非売上+税額矛盾(2件目)', kamoku: '売上高'},
+  ];
+  // モーダルを表示 (Promise は無視、チュートリアルが「次へ」で閉じる)
+  showNonTaxableModal(sampleMismatches).then(() => {});
+}
+
+// 課売返振替モーダルをサンプルデータで開く
+function showSampleKauuriModal() {
+  const sampleCandidates = [
+    {slip_no: '000003', date: '2024/04/03', side: '借方',
+     orig_kamoku: '売掛金', amount: -50000, tax_rate: '10',
+     summary: '課売上+マイナス(返品)'},
+  ];
+  showKauuriModal(sampleCandidates, '売上値引高').then(() => {});
+}
+
+// 借貸不一致補完モーダルをサンプルデータで開く
+function showSampleBalanceFillModal() {
+  const sampleCandidates = [
+    {slip_no: '000007', date: '2024/04/07',
+     dr_total: 55000, cr_total: 50000, diff: 5000},
+  ];
+  showBalanceFillModal(sampleCandidates, '仮受消費税').then(() => {});
+}
+
+// 同名異コード dedup モーダルをサンプルデータで開く
+function showSampleDedupModal() {
+  // 擬似的な sameNameGroups と allGroups を構築
+  const fakeSameNameGroups = new Map([['山田商店', ['F001', 'F002']]]);
+  const fakePairs = [
+    ['2024/04/08\t000008', [{drPartnerCode:'F001', drPartner:'山田商店', crPartnerCode:'', crPartner:''}]],
+    ['2024/04/08\t000009', [{drPartnerCode:'F002', drPartner:'山田商店', crPartnerCode:'', crPartner:''}]],
+  ];
+  const fakeGroups = new Map(fakePairs);
+  showDedupModal(fakeSameNameGroups, fakeGroups).then(() => {});
+}
+
+// サンプルデータで実際に変換を実行し Step3 に遷移する
+async function runSampleConversion() {
+  // 全モーダルを閉じる
+  closeSampleModals();
+  // オプションをデフォルト値に合わせて設定
+  const nonTaxSel = document.getElementById('opt-non-taxable-strategy');
+  if (nonTaxSel) nonTaxSel.value = 'change-to-taxable';
+  const kauuriSel = document.getElementById('opt-kauuri-rebate-strategy');
+  if (kauuriSel) kauuriSel.value = 'auto-rebate';
+  const bfSel = document.getElementById('opt-balance-fill-strategy');
+  if (bfSel) bfSel.value = 'auto-fill';
+  const otSel = document.getElementById('opt-outside-tax-strategy');
+  if (otSel) otSel.value = 'zero-tax';
+  // 取引先マスタ ON にして dedup も演習
+  const outPartners = document.getElementById('opt-output-partners');
+  if (outPartners) { outPartners.checked = true; togglePartnerOptions(); }
+  // 変換実行 (await で結果まで待つ)
+  await executeConversion();
+}
+
+// チュートリアル中に開いたモーダルをすべて閉じる
+function closeSampleModals() {
+  ['nontax-modal','kauuri-modal','balance-fill-modal','dedup-modal',
+   'outside-tax-modal','slip-detail-modal'].forEach(id => {
+    const m = document.getElementById(id);
+    if (m) m.style.display = 'none';
+  });
+  // pending resolve をキャンセル扱いで解決
+  if (window._nontaxResolve) { const r=window._nontaxResolve; window._nontaxResolve=null; r('cancel'); }
+  if (window._kauuriResolve) { const r=window._kauuriResolve; window._kauuriResolve=null; r('cancel'); }
+  if (window._balanceFillResolve) { const r=window._balanceFillResolve; window._balanceFillResolve=null; r('cancel'); }
+  if (window._dedupResolve) { const r=window._dedupResolve; window._dedupResolve=null; r('cancel'); }
+  if (window._outsideTaxModalResolve) { const r=window._outsideTaxModalResolve; window._outsideTaxModalResolve=null; r(null); }
+}
+
+// Step3 完了後に元伝票モーダルをサンプルで開く
+function showSampleSlipDetail() {
+  if (!conversionResult || !conversionResult.originalGroups) {
+    // 変換結果がない場合はスキップ
+    return;
+  }
+  // 最初の伝票を取得
+  const firstEntry = conversionResult.originalGroups.entries().next().value;
+  if (!firstEntry) return;
+  const key = firstEntry[0];
+  const parts = key.split('\t');
+  const date = parts[0] || '2024/04/01';
+  const slipNo = parts[1] || '000001';
+  showSlipDetail(slipNo, date);
+}
+
+// チュートリアル完了時: 状態をリセットして Step1 に戻す
+function resetTutorialState() {
+  closeSampleModals();
+  resetToStep1();
+  localStorage.setItem('tutorial_completed', '1');
+}
+
+// ===========================================================================
+// チュートリアル — ステップ定義 (18 ステップ、実画面遷移版)
 // ===========================================================================
 
 const tutorialSteps = [
+  // Step 1: ようこそ
   {
     target: null,
     title: "ようこそ、奉行→freee 変換ツールへ",
-    content: "このツールは勘定奉行から書き出した CSV を、freee がそのまま取込める形式に変換します。\n\n5 分のチュートリアルで使い方を覚えましょう。慣れたユーザーはスキップして OK です。",
-    buttons: [{label: "はじめる", action: "next", primary: true}, {label: "スキップ", action: "skip"}]
+    content: "このツールは勘定奉行から書き出した CSV を、freee がそのまま取込める形式に変換します。\n\nこれから実際の画面を動かしながら使い方を紹介します。\n慣れたユーザーはスキップして OK です。",
+    buttons: [{label: "はじめる", action: "next", primary: true}, {label: "スキップ", action: "skip"}],
+    action: null
   },
+  // Step 2: ツールの役割
   {
     target: null,
     title: "何をするツール?",
-    content: "奉行→freee の翻訳機です。\n\n奉行と freee は仕訳の書き方ルールが微妙に違います。例えば\n・奉行の「複合」科目 → freee には存在しないので別形式に変換\n・奉行の「非仕入」 → freee の「非対仕入」に正しく対応\n・仮受消費税の自動補完\n\nこのツールが全部自動でやります。\n\n変換時に「freee で取込エラーになりそうな箇所」を検出して自動補正するチェック機能付きです。"
+    content: "奉行→freee の翻訳機です。\n\n奉行と freee は仕訳の書き方ルールが微妙に違います。例えば\n・奉行の「複合」科目 → freee には存在しないので別形式に変換\n・奉行の「非仕入」 → freee の「非対仕入」に正しく対応\n・仮受消費税の自動補完\n\nこのツールが全部自動でやります。",
+    action: null
   },
+  // Step 3: サンプル CSV を読み込む (実際に Step2 へ遷移)
   {
     target: "#drop-zone",
-    title: "CSV を選ぶ",
-    content: "ここをクリック（またはドラッグ＆ドロップ）して奉行から書き出した CSV を選んでください。\n\n対応形式:\n・CP932 / Shift-JIS（奉行の標準）\n・UTF-8 / UTF-8-BOM\n\n複数ファイル選択も OK（期首〜期末で別ファイルになっている場合等）。"
+    title: "サンプル CSV を読み込みます",
+    content: "本来は奉行 CSV を選びますが、チュートリアルではサンプルを自動ロードします。\n\nクリックでファイル選択画面が開き、複数ファイルも OK です。\n\n今はサンプルを自動ロード済みです → 「次へ」で Step2 へ進みます。",
+    action: () => { loadSampleCsv(); }
   },
+  // Step 4: オプション画面の役割
   {
     target: "#section-step2",
     title: "オプション画面",
-    content: "ファイル選択後、「次へ: オプション設定」をクリックするとここで変換ルールを決めます。\n\n基本はデフォルトのままで OK です。\n\n特殊な仕訳パターンに対しては「対処戦略」を選べます（次のスライドで説明）。"
+    content: "ファイル選択後にここで変換ルールを決めます。\n\n基本はデフォルトのままで OK です。\n\n特殊な仕訳パターンに対しては「対処戦略」を選べます（次から順に実演します）。",
+    action: null
   },
+  // Step 5: 対処戦略 1/5 — 非課税+税額
   {
     target: "#opt-non-taxable-strategy",
     title: "対処戦略 1/5: 非課税+税額矛盾",
-    content: "奉行で「非売上」と書いてあるのに税額がある仕訳の対処方法。\n\n・デフォルト「警告のみ」: freee がエラーで弾くので手動修正\n・「自動: 課税売上に変更」: 税区分を変更して取込通過\n・「対話: 1件ずつ確認」: モーダルで件別判断"
+    content: "奉行で「非売上」と書いてあるのに税額がある仕訳の対処方法。\n\n・デフォルト「警告のみ」: freee がエラーで弾くので手動修正\n・「自動: 課税売上に変更」: 税区分を変更して取込通過\n・「対話: 1件ずつ確認」: モーダルで件別判断\n\n次のステップで「対話モーダル」を実際に開いてみます。",
+    action: null
   },
+  // Step 6: 非課税 対話モーダルを実演
+  {
+    target: "#nontax-modal",
+    title: "対話モーダル実演 — 非課税+税額矛盾",
+    content: "「対話: 1件ずつ確認」を選ぶとこんなモーダルが開きます。\n\n各行ごとに「税区分を変更」「税額を 0 に修正」「そのまま」を選べます。\n\n右上「📥 CSV」「📋 コピー」でデータをエクセルで確認することも可能です。\n\n「次へ」でモーダルを閉じて次の戦略へ進みます。",
+    action: () => { showSampleNontaxModal(); }
+  },
+  // Step 7: 対処戦略 2/5 — 課売返振替
   {
     target: "#opt-kauuri-rebate-strategy",
-    title: "対処戦略 2/5: 課売上マイナス起票",
-    content: "返品・値引きで奉行が「課税売上 マイナス金額」で書いた仕訳。\n\nfreee では「課税売返10%」と別区分で書くのが正解。\n\nデフォルトは警告のみ。「自動振替」を選ぶと借方移動+符号反転+科目変更を自動実行。"
+    title: "対処戦略 2/5: 課売上+マイナス起票",
+    content: "返品・値引きで奉行が「課税売上 マイナス金額」で書いた仕訳。\n\nfreee では「課税売返10%」と別区分で書くのが正解。\n\nデフォルトは警告のみ。「自動振替」を選ぶと借方移動+符号反転+科目変更を自動実行。\n\n次のステップで対話モーダルを実演します。",
+    action: () => { closeSampleModals(); }
   },
+  // Step 8: 課売返 対話モーダルを実演
+  {
+    target: "#kauuri-modal",
+    title: "対話モーダル実演 — 課売上+マイナス起票",
+    content: "「対話: 1件ずつ確認」を選ぶとこんなモーダルが開きます。\n\n返品伝票ごとに「自動振替する」「変更なし」を選択できます。\n振替先の勘定科目（売上値引高 等）も指定可能です。\n\n「次へ」でモーダルを閉じて次の戦略へ進みます。",
+    action: () => { showSampleKauuriModal(); }
+  },
+  // Step 9: 対処戦略 3/5 — 対象外+税額
   {
     target: "#opt-outside-tax-strategy",
     title: "対処戦略 3/5: 対象外+税額",
-    content: "消費税中間納付の仕訳など、奉行が「対象外」科目に税額を独自記録しているケース。\n\nfreee は「対象外なら税額 0 必須」なのでエラー。\n\nデフォルトで税額を 0 化。申告計算に影響なし（対象外は申告対象外区分）。"
+    content: "消費税中間納付の仕訳など、奉行が「対象外」科目に税額を独自記録しているケース。\n\nfreee は「対象外なら税額 0 必須」なのでエラー。\n\nデフォルトで税額を 0 化。申告計算に影響なし（対象外は申告対象外区分）。",
+    action: () => { closeSampleModals(); }
   },
+  // Step 10: 対処戦略 4/5 — 借貸不一致
   {
     target: "#opt-balance-fill-strategy",
-    title: "対処戦略 4/5: 借貸不一致",
-    content: "OBC データの不一致伝票を仮受消費税等で自動補完。\n\nデフォルトで「自動補完（仮受消費税）」。\n\n月次売上の集計仕訳でよくある「預かり消費税の独立行が欠落」パターンに対処。"
+    title: "対処戦略 4/5: 借貸不一致 (自動補完)",
+    content: "OBC データの不一致伝票を仮受消費税等で自動補完します。\n\nデフォルトで「自動補完（仮受消費税）」。\n\n月次売上の集計仕訳でよくある「預かり消費税の独立行が欠落」パターンに対処。\n\n次のステップで対話モーダルを実演します。",
+    action: null
   },
+  // Step 11: 借貸補完モーダルを実演
+  {
+    target: "#balance-fill-modal",
+    title: "対話モーダル実演 — 借貸不一致補完",
+    content: "「対話: 1件ずつ確認」を選ぶとこんなモーダルが開きます。\n\n各伝票の不一致差額と補完予定を確認しながら「補完行追加」「除外」「変更なし」を選択できます。\n\n「次へ」でモーダルを閉じます。",
+    action: () => { showSampleBalanceFillModal(); }
+  },
+  // Step 12: 対処戦略 5/5 — 同名異コード + 取引先マスタ ON
   {
     target: "#opt-dedup-strategy",
     title: "対処戦略 5/5: 同名異コード",
-    content: "取引先マスタ生成オプション ON 時に有効。\n\n奉行で同じ取引先名なのに別コードを持つケースの統合戦略。\n\n「最頻使用コードに統合」推奨。「対話: 1件ずつ」で件別判断も可能。"
+    content: "取引先マスタ生成オプション ON 時に有効。\n\n奉行で同じ取引先名なのに別コードを持つケースの統合戦略。\n\n「最頻使用コードに統合」推奨。「対話: 1件ずつ」で件別判断も可能。\n\n次のステップで実際に変換を実行して Step3 結果画面に進みます。",
+    action: () => { closeSampleModals(); }
   },
-  {
-    target: "#btn-execute",
-    title: "変換実行",
-    content: "クリックで変換開始。1,000 件で数秒、10,000 件でも 1 分以内が目安。\n\n対処戦略で「対話: 1件ずつ」を選んだ場合は、モーダルで件別選択画面が出ます。"
-  },
+  // Step 13: 変換実行 + 結果画面遷移
   {
     target: null,
-    title: "結果画面で何ができる?",
-    content: "変換完了後の結果画面では:\n\n📥 CSV ダウンロード: freee 取込用 CSV を取得\n\n📋 監査ログ: 「要確認」「業務確認用」「補完結果」を表示\n\n🔍 伝票No クリック: 元の奉行データの該当伝票全行を表示（モーダル）\n\n📊 対処結果セクション: 各戦略で補完/振替した件数と詳細"
+    title: "変換実行中...",
+    content: "サンプルデータを実際に変換して Step3 結果画面に進みます。\n\n各対処戦略を適用した変換が実行されます。\n\n自動的に次のステップへ移動します。しばらくお待ちください。",
+    action: () => {
+      // 非同期で変換実行し、完了したら次ステップへ
+      runSampleConversion().then(() => {
+        if (tutActive) { tutCurrentStep++; tutShowStep(tutCurrentStep); }
+      });
+    },
+    // ボタンなし: action の then() が次ステップを呼ぶ
+    buttons: [{label: "スキップ", action: "skip"}]
   },
+  // Step 14: 結果画面の見方
   {
-    target: null,
-    title: "ワンポイント: モーダル内 CSV ダウンロード",
-    content: "「対話: 1件ずつ確認」を選ぶと、確認モーダルが開きます。\n\nそのモーダル右上に「📥 CSV」「📋 コピー」ボタンがあり、確定前にデータをエクセル等で検討できます。\n\n本格的なデータ確認は Excel 派の経理担当者に重宝されます。"
+    target: "#section-step3",
+    title: "結果画面の見方",
+    content: "Step3 変換結果画面です。\n\n📥 CSV ダウンロード: freee 取込用 CSV を取得\n📋 監査ログ: 「要確認」「業務確認用」「補完結果」を表示\n🔍 伝票No クリック: 元の奉行データの該当伝票全行を表示\n📊 対処結果セクション: 各戦略で補完/振替した件数と詳細",
+    action: null
   },
+  // Step 15: 元伝票モーダルを実演
+  {
+    target: "#slip-detail-modal",
+    title: "元伝票モーダルの確認",
+    content: "監査ログの「伝票No」をクリックすると、奉行原本データをそのまま確認できます。\n\nこれにより freee 変換後のデータと原本を突き合わせる確認が手元でできます。\n\n「次へ」でモーダルを閉じます。",
+    action: () => { showSampleSlipDetail(); }
+  },
+  // Step 16: 対処結果セクション
+  {
+    target: "#result-content",
+    title: "対処結果セクション",
+    content: "結果画面の下部には各戦略の適用結果が記録されています。\n\n「課税売返振替結果」「借貸補完結果」「対象外税額補正結果」などのセクションを展開して内容を確認できます。\n\nCSV ダウンロードもできます。",
+    action: () => { closeSampleModals(); }
+  },
+  // Step 17: 困った時
   {
     target: ".sidebar-nav",
     title: "困った時は",
-    content: "左サイドバーから:\n・「freee手順」: freee へのインポート手順\n・「ヒストリ」: 過去の変換履歴\n・「設定」: デフォルト値の保存\n・「About」: ツールの情報\n\nこのチュートリアルは About ページからいつでも再生できます。"
+    content: "左サイドバーから:\n・「freee手順」: freee へのインポート手順\n・「ヒストリ」: 過去の変換履歴\n・「設定」: デフォルト値の保存\n・「About」: ツールの情報\n\nこのチュートリアルは About ページからいつでも再生できます。",
+    action: null
   },
+  // Step 18: 完了 + リセット
   {
     target: null,
     title: "チュートリアル完了!",
-    content: "これで使い方は OK です!\n\nまずは奉行 CSV を選んで試してみてください。\n\nもう一度見たい場合は左サイドバー「About」→「チュートリアルを再生」から起動できます。",
-    buttons: [{label: "始めましょう", action: "finish", primary: true}]
+    content: "これで使い方の紹介は以上です!\n\n「完了」をクリックするとサンプルデータをクリアして Step1 に戻ります。\n\nもう一度見たい場合は左サイドバー「About」→「チュートリアルを再生」から起動できます。",
+    buttons: [{label: "完了", action: "finish", primary: true}],
+    action: null
   }
 ];
 
@@ -4826,12 +5030,10 @@ function tutorialEnd(complete) {
   document.getElementById('tutorial-overlay').style.display = 'none';
   document.getElementById('tutorial-highlight-box').style.display = 'none';
   document.removeEventListener('keydown', tutKeyHandler);
-  if (complete) {
-    localStorage.setItem('tutorial_completed', '1');
-  } else {
-    // skip: mark complete too so it doesn't auto-launch again
-    localStorage.setItem('tutorial_completed', '1');
-  }
+  // 終了時: モーダルを閉じてサンプル状態をリセット
+  closeSampleModals();
+  resetToStep1();
+  localStorage.setItem('tutorial_completed', '1');
 }
 
 function tutorialRestart() {
@@ -4867,6 +5069,11 @@ function tutPrev() {
 function tutShowStep(idx) {
   const step = tutorialSteps[idx];
   const total = tutorialSteps.length;
+
+  // ステップ action を最初に実行 (画面遷移などレイアウト変更が先に走る)
+  if (step.action) {
+    try { step.action(); } catch(e) { console.warn('tutorial action error', e); }
+  }
 
   // ステップラベル
   document.getElementById('tut-step-label').textContent = 'STEP ' + (idx + 1) + ' / ' + total;
@@ -4911,45 +5118,55 @@ function tutShowStep(idx) {
   });
 
   // ターゲット要素のハイライト＆ツールチップ配置
+  // action 後にレイアウト変更が生じる可能性があるため、遅延して位置計算
   const targetSel = step.target;
-  let targetEl = null;
-  if (targetSel) {
-    targetEl = document.querySelector(targetSel);
-    // step2/dedup などは非表示の可能性
+  function positionHighlight() {
+    let targetEl = null;
+    if (targetSel) {
+      targetEl = document.querySelector(targetSel);
+      // step2/dedup などは非表示の可能性
+      if (targetEl) {
+        const rect = targetEl.getBoundingClientRect();
+        const isVisible = rect.width > 0 && rect.height > 0 &&
+          rect.bottom > 0 && rect.right > 0 &&
+          rect.top < window.innerHeight && rect.left < window.innerWidth;
+        if (!isVisible) targetEl = null;
+      }
+    }
+
+    const hlBox = document.getElementById('tutorial-highlight-box');
+    const bg = document.getElementById('tutorial-bg');
+
     if (targetEl) {
-      const rect = targetEl.getBoundingClientRect();
-      const isVisible = rect.width > 0 && rect.height > 0 &&
-        rect.bottom > 0 && rect.right > 0 &&
-        rect.top < window.innerHeight && rect.left < window.innerWidth;
-      if (!isVisible) targetEl = null;
+      // スクロールして対象を viewport center に
+      targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+      // highlight box
+      bg.style.display = 'none'; // box-shadow trick で穴開けするので bg は隠す
+      hlBox.style.display = '';
+      // 少し遅延してrect再取得（scrollIntoView完了後）
+      setTimeout(() => {
+        const r = targetEl.getBoundingClientRect();
+        const pad = 6;
+        hlBox.style.top    = (r.top    - pad) + 'px';
+        hlBox.style.left   = (r.left   - pad) + 'px';
+        hlBox.style.width  = (r.width  + pad * 2) + 'px';
+        hlBox.style.height = (r.height + pad * 2) + 'px';
+        tutPositionTooltip(r, pad);
+      }, 120);
+    } else {
+      // 中央 modal モード
+      hlBox.style.display = 'none';
+      bg.style.display = '';
+      tutPositionCenter();
     }
   }
 
-  const hlBox = document.getElementById('tutorial-highlight-box');
-  const bg = document.getElementById('tutorial-bg');
-
-  if (targetEl) {
-    // スクロールして対象を viewport center に
-    targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-    // highlight box
-    bg.style.display = 'none'; // box-shadow trick で穴開けするので bg は隠す
-    hlBox.style.display = '';
-    // 少し遅延してrect再取得（scrollIntoView完了後）
-    setTimeout(() => {
-      const r = targetEl.getBoundingClientRect();
-      const pad = 6;
-      hlBox.style.top    = (r.top    - pad) + 'px';
-      hlBox.style.left   = (r.left   - pad) + 'px';
-      hlBox.style.width  = (r.width  + pad * 2) + 'px';
-      hlBox.style.height = (r.height + pad * 2) + 'px';
-      tutPositionTooltip(r, pad);
-    }, 120);
+  // action がある場合は DOM 更新を待ってから位置計算
+  if (step.action) {
+    setTimeout(positionHighlight, 200);
   } else {
-    // 中央 modal モード
-    hlBox.style.display = 'none';
-    bg.style.display = '';
-    tutPositionCenter();
+    positionHighlight();
   }
 }
 
