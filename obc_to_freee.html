@@ -1080,9 +1080,22 @@ function checkSlipBalance(allRows, knownMismatchSlips) {
 }
 
 // 奉行原本監査
-function auditObcSource(allGroups, dateFrom, dateTo) {
+function auditObcSource(allGroups, dateFrom, dateTo, balanceFillLog) {
   const slipDr = new Map(), slipCr = new Map(), slipDate = new Map();
   const minusKaubai = [];
+
+  // balance fill 済み (slip_no + date) セットを構築
+  // auto-fill/skip 済みのみ除外。keep 伝票は補完されていないため警告に残す
+  const balanceFilledKeys = new Set();
+  if (balanceFillLog && balanceFillLog.length > 0) {
+    for (const entry of balanceFillLog) {
+      if (entry.action === 'auto-fill' || entry.action === 'skip') {
+        const sn = entry.slip_no || '';
+        const dt = entry.date || '';
+        if (sn) balanceFilledKeys.add(sn + '|' + dt);
+      }
+    }
+  }
 
   for (const [key, rows] of allGroups) {
     for (const r of rows) {
@@ -1115,6 +1128,8 @@ function auditObcSource(allGroups, dateFrom, dateTo) {
     const dr = slipDr.get(k), cr = slipCr.get(k)||0;
     if (dr !== cr) {
       const [date, slipNo] = k.split('|');
+      // balance fill 済みは[要確認]から除外 (Step3「借貸補完結果」セクションに集約)
+      if (balanceFilledKeys.has(slipNo + '|' + date)) continue;
       mismatches.push({slipNo, date, dr, cr});
     }
   }
@@ -1630,8 +1645,8 @@ async function executeConversion() {
     const balanceResult = checkSlipBalance(allRows, effectiveKnownMismatches);
     errors.balance = balanceResult.unknown;
 
-    // 奉行原本監査
-    const auditResult = auditObcSource(allGroups, opts.dateFrom, opts.dateTo);
+    // 奉行原本監査 (balance fill 済み伝票を借貸不一致警告から除外)
+    const auditResult = auditObcSource(allGroups, opts.dateFrom, opts.dateTo, balanceFillLog);
 
     // ファイル分割 (上限厳守、戻り値は {files, warnings})
     const splitResult = splitOutputFiles(allRows, slipSizes, opts.rowsPerFile);
@@ -3094,21 +3109,8 @@ function renderAuditSections(r) {
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
   }
 
-  // 借貸不一致補完ログ (r.balanceFillLog から)
-  if (r.balanceFillLog && r.balanceFillLog.length > 0) {
-    const filled = r.balanceFillLog.filter(e => e.action === 'auto-fill');
-    if (filled.length > 0) {
-      const rows = filled.map(m => {
-        const sign = m.diff >= 0 ? '+' : '';
-        return `<tr><td>${escHtml(m.slip_no||'')}</td><td>${escHtml(m.date||'')}</td>
-          <td style="text-align:right">${m.dr_total.toLocaleString()}</td><td style="text-align:right">${m.cr_total.toLocaleString()}</td>
-          <td style="text-align:right">${sign}${m.diff.toLocaleString()}</td>
-          <td>${escHtml(m.fill_side||'')}</td><td style="text-align:right">${m.fill_amount.toLocaleString()}</td><td>${escHtml(m.fill_kamoku||'')}</td></tr>`;
-      }).join('');
-      sections.push({title:'[要確認] 借貸不一致補完 (OBC原本欠陥伝票)', count: filled.length, type:'warn',
-        body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th><th>補完側</th><th>補完金額</th><th>補完科目</th></tr></thead><tbody>${rows}</tbody></table>`});
-    }
-  }
+  // [要確認] 借貸不一致補完セクションは監査ログに出さない
+  // (Step3「借貸補完結果」セクションに集約済み。補完済み伝票はaudit.mismatchesから除外済み)
 
   // 取引先 A: 同コード異名
   if (r.partnerData && r.partnerData.multiNameDetails.length > 0) {
