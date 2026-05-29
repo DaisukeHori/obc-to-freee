@@ -388,6 +388,35 @@
               </div>
             </div>
           </div>
+          <div class="options-group-box" style="margin-top:16px;">
+            <div class="form-group">
+              <label>借貸不一致の対処方法</label>
+              <select id="opt-balance-fill-strategy" onchange="toggleBalanceFillOptions()">
+                <option value="auto-fill">自動: 補完行を追加 (推奨・OBC原本欠陥対処)</option>
+                <option value="warn-only">自動: 警告のみ (変換なし)</option>
+                <option value="skip">自動: 不一致伝票を除外</option>
+                <option value="custom">対話: 1件ずつ確認</option>
+              </select>
+              <small style="color:#666;">奉行原本で借方合計 ≠ 貸方合計の伝票に補完行を追加します。仮受消費税が欠落しているOBC原本欠陥伝票(002193/002820/003305等)への対処。</small>
+            </div>
+            <div id="balance-fill-account-box" style="">
+              <div class="form-group">
+                <label>補完勘定科目</label>
+                <select id="opt-balance-fill-account">
+                  <option value="仮受消費税">仮受消費税 (推奨・OBC原本欠落科目)</option>
+                  <option value="仮払消費税">仮払消費税</option>
+                  <option value="現金過不足">現金過不足</option>
+                  <option value="雑損失">雑損失</option>
+                  <option value="雑収入">雑収入</option>
+                  <option value="__custom__">カスタム入力</option>
+                </select>
+              </div>
+              <div id="balance-fill-custom-account-box" style="display:none;" class="form-group">
+                <label>カスタム勘定科目名</label>
+                <input type="text" id="opt-balance-fill-custom-account" placeholder="例: 雑収入" style="font-family:monospace;">
+              </div>
+            </div>
+          </div>
           <div style="margin-top:16px; display:flex; gap:8px;">
             <button class="btn btn-secondary" onclick="goToStep1()">← 戻る</button>
             <button class="btn btn-primary" id="btn-execute" onclick="executeConversion()">変換実行</button>
@@ -534,6 +563,32 @@
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn btn-secondary btn-sm" onclick="kauuriAutoAll()">全件 自動推奨で決定</button>
         <button class="btn btn-primary" onclick="kauuriConfirm()">次へ (確定)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 借貸不一致補完 custom 対話モーダル -->
+<div class="modal-overlay" id="balance-fill-modal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">借貸不一致補完の確認</div>
+      <div style="display:flex;gap:6px;margin-left:auto;">
+        <button class="btn btn-success btn-sm" onclick="balanceFillModalDownloadCsv()" title="借貸不一致一覧をCSVダウンロード">📥 CSV</button>
+        <button class="btn btn-secondary btn-sm" onclick="balanceFillModalToggleCopy()" title="コピー用テキスト表示">📋 コピー</button>
+      </div>
+    </div>
+    <div id="balance-fill-modal-copy-area" style="display:none;padding:0 20px 8px;">
+      <textarea id="balance-fill-modal-copy-ta" readonly rows="5" style="width:100%;font-size:11px;font-family:monospace;resize:vertical;" onclick="this.select()"></textarea>
+    </div>
+    <div class="modal-body" id="balance-fill-modal-body">
+      <p style="font-size:14px;color:#555;margin-bottom:12px;">以下の借貸不一致伝票について、どう対処するか選択してください。</p>
+    </div>
+    <div class="modal-footer" style="display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="balanceFillCancel()">← 戻る</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" onclick="balanceFillAutoAll()">全件 自動補完で決定</button>
+        <button class="btn btn-primary" onclick="balanceFillConfirm()">次へ (確定)</button>
       </div>
     </div>
   </div>
@@ -1514,6 +1569,31 @@ async function executeConversion() {
       kauuriRebateLog = kauuri.rebateLog;
     }
 
+    // 借貸不一致補完: auto-fill / skip / custom 時は処理
+    let balanceFillLog = [];
+    if (opts.balanceFillStrategy && opts.balanceFillStrategy !== 'warn-only') {
+      let balanceFillCustomChoices = {};
+      if (opts.balanceFillStrategy === 'custom') {
+        // custom: 不一致検出 → モーダル → 件別選択
+        const bfMismatches = detectBalanceFillCandidates(allGroups);
+        if (bfMismatches.length > 0) {
+          const modalResult = await showBalanceFillModal(bfMismatches, opts.balanceFillAccount);
+          if (modalResult === null) {
+            goToStep2();
+            return;
+          }
+          balanceFillCustomChoices = modalResult;
+        }
+      }
+      const bf = applyBalanceFillStrategy(allGroups, {
+        strategy: opts.balanceFillStrategy,
+        fillAccount: opts.balanceFillAccount,
+        customChoices: balanceFillCustomChoices,
+      });
+      allGroups = bf.updatedGroups;
+      balanceFillLog = bf.balanceFillLog;
+    }
+
     // 非課税+税額矛盾の interactive/custom 戦略: モーダルでユーザーに選ばせる
     let effectiveNonTaxableStrategy = opts.nonTaxableStrategy;
     let effectiveNonTaxableCustom = opts.nonTaxableCustom || null;
@@ -1590,7 +1670,7 @@ async function executeConversion() {
       slipCount: allGroups.size, partnerData, dedupAuditLog,
       errors, balanceResult, auditResult, totalSkipped,
       nonTaxableResults: nonTaxableResultsCollector,
-      kauuriRebateLog, allGroups, originalGroups,
+      kauuriRebateLog, balanceFillLog, allGroups, originalGroups,
       opts
     };
 
@@ -1628,6 +1708,18 @@ function getOptions() {
       kauuriRebateKamoku = v;
     }
   }
+  // 借貸補完の勘定科目解決
+  const balanceFillStrategy = (document.getElementById('opt-balance-fill-strategy') || {value: 'auto-fill'}).value;
+  let balanceFillAccount = '仮受消費税';
+  const bfSel = document.getElementById('opt-balance-fill-account');
+  if (bfSel) {
+    const v = bfSel.value;
+    if (v === '__custom__') {
+      balanceFillAccount = (document.getElementById('opt-balance-fill-custom-account') || {value: ''}).value.trim() || '仮受消費税';
+    } else {
+      balanceFillAccount = v;
+    }
+  }
   return {
     prefix: document.getElementById('opt-prefix').value || 'freee用_仕訳データ_obc変換',
     rowsPerFile: Math.max(100, parseInt(document.getElementById('opt-rows-per-file').value) || 10000),
@@ -1641,6 +1733,8 @@ function getOptions() {
     knownMismatches,
     kauuriRebateStrategy,
     kauuriRebateKamoku,
+    balanceFillStrategy,
+    balanceFillAccount,
   };
 }
 
@@ -1654,6 +1748,134 @@ function toggleKauuriCustomKamoku() {
   const sel = document.getElementById('opt-kauuri-rebate-kamoku');
   const box = document.getElementById('kauuri-custom-kamoku-box');
   if (sel && box) box.style.display = (sel.value === '__custom__') ? '' : 'none';
+}
+
+function toggleBalanceFillOptions() {
+  const strat = (document.getElementById('opt-balance-fill-strategy') || {value: 'auto-fill'}).value;
+  const box = document.getElementById('balance-fill-account-box');
+  if (box) box.style.display = (strat === 'warn-only') ? 'none' : '';
+}
+
+function toggleBalanceFillCustomAccount() {
+  const sel = document.getElementById('opt-balance-fill-account');
+  const box = document.getElementById('balance-fill-custom-account-box');
+  if (sel && box) box.style.display = (sel.value === '__custom__') ? '' : 'none';
+}
+
+// ===========================================================================
+// 借貸不一致補完変換 (applyBalanceFillStrategy)
+// ===========================================================================
+
+/**
+ * allGroups (Map: key → rows) を走査し、借貸不一致伝票に補完行を追加する。
+ * strategy: 'warn-only' | 'auto-fill' | 'skip' | 'custom'
+ * fillAccount: 補完行の勘定科目。
+ * customChoices: { "slip_no": { action: "auto-fill"|"skip"|"keep" } }
+ * 戻り値: { updatedGroups: Map, balanceFillLog: Array, skipSlips: Set }
+ */
+function applyBalanceFillStrategy(allGroups, opts) {
+  const strategy    = (opts && opts.strategy)     || 'warn-only';
+  const fillAccount = (opts && opts.fillAccount)  || '仮受消費税';
+  const customChoices = (opts && opts.customChoices) || {};
+
+  if (strategy === 'warn-only') return { updatedGroups: allGroups, balanceFillLog: [], skipSlips: new Set() };
+
+  const updatedGroups = new Map();
+  const balanceFillLog = [];
+  const skipSlips = new Set();
+
+  for (const [key, slipRows] of allGroups) {
+    const parts = key.split('\t');
+    const slipNo = parts[1] || '';
+    const dateStr = parts[0] || '';
+
+    // 借貸合計計算
+    let drTotal = 0, crTotal = 0;
+    for (const r of slipRows) {
+      drTotal += parseInt(String(r.drAmount ?? '').trim() || '0', 10) || 0;
+      crTotal += parseInt(String(r.crAmount ?? '').trim() || '0', 10) || 0;
+    }
+
+    if (drTotal === crTotal) {
+      updatedGroups.set(key, slipRows);
+      continue;
+    }
+
+    const diff = drTotal - crTotal;
+
+    // action 決定
+    let action = 'auto-fill';
+    if (strategy === 'custom') {
+      const choice = customChoices[slipNo] || { action: 'auto-fill' };
+      action = choice.action || 'auto-fill';
+    } else if (strategy === 'skip') {
+      action = 'skip';
+    }
+
+    if (action === 'skip') {
+      skipSlips.add(slipNo);
+      balanceFillLog.push({
+        slip_no: slipNo, date: dateStr,
+        dr_total: drTotal, cr_total: crTotal, diff,
+        fill_side: '', fill_amount: 0, fill_kamoku: '', action: 'skip',
+      });
+      // グループをスキップ
+      continue;
+    }
+
+    if (action === 'keep') {
+      updatedGroups.set(key, slipRows);
+      balanceFillLog.push({
+        slip_no: slipNo, date: dateStr,
+        dr_total: drTotal, cr_total: crTotal, diff,
+        fill_side: '', fill_amount: 0, fill_kamoku: '', action: 'keep',
+      });
+      continue;
+    }
+
+    // auto-fill: 補完行追加
+    // diff > 0 → 借方超過 → 貸方に補完
+    // diff < 0 → 貸方超過 → 借方に補完
+    const fillAmount = Math.abs(diff);
+    const fillSide = diff > 0 ? '貸方' : '借方';
+    const tmpl = slipRows[0];
+
+    const fillRow = {
+      date: tmpl.date || dateStr,
+      slipNo: slipNo,
+      summary: tmpl.summary || '',
+      drKamoku:     fillSide === '借方' ? fillAccount : '',
+      drHojo:       '',
+      drBumon:      fillSide === '借方' ? (tmpl.drBumon || '') : '',
+      drAmount:     fillSide === '借方' ? String(fillAmount) : '',
+      drTaxCode:    fillSide === '借方' ? '対象外' : '',
+      drTaxLabel:   fillSide === '借方' ? '対象外' : '',
+      drTaxLabelRaw: fillSide === '借方' ? '対象外' : '',
+      drTaxAmount:  fillSide === '借方' ? '0' : '',
+      drPartner:    '',
+      drPartnerCode:'',
+      crKamoku:     fillSide === '貸方' ? fillAccount : '',
+      crHojo:       '',
+      crBumon:      fillSide === '貸方' ? (tmpl.crBumon || '') : '',
+      crAmount:     fillSide === '貸方' ? String(fillAmount) : '',
+      crTaxCode:    fillSide === '貸方' ? '対象外' : '',
+      crTaxLabel:   fillSide === '貸方' ? '対象外' : '',
+      crTaxLabelRaw: fillSide === '貸方' ? '対象外' : '',
+      crTaxAmount:  fillSide === '貸方' ? '0' : '',
+      crPartner:    '',
+      crPartnerCode:'',
+    };
+
+    updatedGroups.set(key, [...slipRows, fillRow]);
+    balanceFillLog.push({
+      slip_no: slipNo, date: dateStr,
+      dr_total: drTotal, cr_total: crTotal, diff,
+      fill_side: fillSide, fill_amount: fillAmount, fill_kamoku: fillAccount,
+      action: 'auto-fill',
+    });
+  }
+
+  return { updatedGroups, balanceFillLog, skipSlips };
 }
 
 // ===========================================================================
@@ -1922,9 +2144,11 @@ function applyKauuriRebate(allGroups, opts) {
 let _dedupModalData = null;   // { sameNameGroups, allGroups }
 let _nontaxModalData = null;  // mismatches array
 let _kauuriModalData = null;  // candidates array
+let _balanceFillModalData = null;  // mismatches array
 let _dedupModalCopyVisible = false;
 let _nontaxModalCopyVisible = false;
 let _kauuriModalCopyVisible = false;
+let _balanceFillModalCopyVisible = false;
 
 // ===========================================================================
 // dedup モーダル CSV/コピー (モーダル内)
@@ -2541,6 +2765,162 @@ function kauuriCancel() {
 }
 
 // ===========================================================================
+// 借貸不一致補完 モーダル
+// ===========================================================================
+
+/**
+ * allGroups から借貸不一致伝票を検出して候補リストを返す。
+ * 戻り値: [{slip_no, date, dr_total, cr_total, diff}, ...]
+ */
+function detectBalanceFillCandidates(allGroups) {
+  const results = [];
+  for (const [key, rows] of allGroups) {
+    const parts = key.split('\t');
+    const slipNo = parts[1] || '';
+    const dateStr = parts[0] || '';
+    let drTotal = 0, crTotal = 0;
+    for (const r of rows) {
+      drTotal += parseInt(String(r.drAmount ?? '').trim() || '0', 10) || 0;
+      crTotal += parseInt(String(r.crAmount ?? '').trim() || '0', 10) || 0;
+    }
+    if (drTotal !== crTotal) {
+      results.push({
+        slip_no: slipNo, date: dateStr,
+        dr_total: drTotal, cr_total: crTotal, diff: drTotal - crTotal,
+      });
+    }
+  }
+  return results;
+}
+
+function buildBalanceFillModalCsv(mismatches) {
+  const headers = ['伝票No', '日付', '借方合計', '貸方合計', '差'];
+  const lines = [headers.join(',')];
+  (mismatches || []).forEach(m => {
+    const sign = (m.diff >= 0) ? '+' : '';
+    const cells = [
+      m.slip_no || '', m.date || '',
+      String(m.dr_total || 0), String(m.cr_total || 0),
+      sign + String(m.diff || 0),
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildBalanceFillModalTabText(mismatches) {
+  const headers = ['伝票No', '日付', '借方合計', '貸方合計', '差'];
+  const lines = [headers.join('\t')];
+  (mismatches || []).forEach(m => {
+    const sign = (m.diff >= 0) ? '+' : '';
+    lines.push([
+      m.slip_no || '', m.date || '',
+      String(m.dr_total || 0), String(m.cr_total || 0),
+      sign + String(m.diff || 0),
+    ].join('\t'));
+  });
+  return lines.join('\n');
+}
+
+function balanceFillModalDownloadCsv() {
+  if (!_balanceFillModalData) return;
+  const csv = buildBalanceFillModalCsv(_balanceFillModalData);
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `借貸不一致一覧_${today}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function balanceFillModalToggleCopy() {
+  if (!_balanceFillModalData) return;
+  _balanceFillModalCopyVisible = !_balanceFillModalCopyVisible;
+  const area = document.getElementById('balance-fill-modal-copy-area');
+  const ta   = document.getElementById('balance-fill-modal-copy-ta');
+  if (area) area.style.display = _balanceFillModalCopyVisible ? '' : 'none';
+  if (_balanceFillModalCopyVisible && ta) {
+    if (!ta.value) ta.value = buildBalanceFillModalTabText(_balanceFillModalData);
+    ta.select();
+  }
+}
+
+function showBalanceFillModal(candidates, defaultFillAccount) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('balance-fill-modal');
+    const body  = document.getElementById('balance-fill-modal-body');
+
+    _balanceFillModalData = candidates;
+    _balanceFillModalCopyVisible = false;
+    const copyArea = document.getElementById('balance-fill-modal-copy-area');
+    const copyTa   = document.getElementById('balance-fill-modal-copy-ta');
+    if (copyArea) copyArea.style.display = 'none';
+    if (copyTa) copyTa.value = '';
+
+    body.innerHTML = '<p style="font-size:14px;color:#555;margin-bottom:12px;">以下の借貸不一致伝票について、どう対処するか選択してください。</p>'
+      + candidates.map((m, idx) => {
+      const radioName = `bf_${idx}`;
+      const sign = (m.diff >= 0) ? '+' : '';
+      const fillSide = m.diff > 0 ? '貸方' : '借方';
+      return `
+        <div class="dedup-card" data-key="${escAttr(m.slip_no)}" data-idx="${idx}">
+          <div class="dedup-card-name">伝票 No.${escHtml(m.slip_no)} (${escHtml(m.date)})</div>
+          <div style="margin:8px 0; font-size:14px; color:#555">
+            借方合計: <strong>${m.dr_total.toLocaleString()}</strong> / 貸方合計: <strong>${m.cr_total.toLocaleString()}</strong> / 差: <strong style="color:var(--orange)">${sign}${m.diff.toLocaleString()}</strong>
+            → <span style="color:var(--blue)">${fillSide}に ${Math.abs(m.diff).toLocaleString()}円 (${escHtml(defaultFillAccount||'仮受消費税')}) 補完予定</span>
+          </div>
+          <div class="radio-options">
+            <label><input type="radio" name="${radioName}" value="auto-fill" checked> 補完行を追加 (推奨)</label>
+            <label><input type="radio" name="${radioName}" value="skip"> この伝票を除外</label>
+            <label><input type="radio" name="${radioName}" value="keep"> 変更なし (不一致のまま)</label>
+          </div>
+        </div>`;
+    }).join('');
+
+    window._balanceFillResolve = (autoAll) => {
+      modal.style.display = 'none';
+      if (autoAll === 'cancel') { resolve(null); return; }
+      const choices = {};
+      const cards = body.querySelectorAll('.dedup-card');
+      cards.forEach(card => {
+        const slipNo = card.dataset.key;
+        if (autoAll) {
+          choices[slipNo] = { action: 'auto-fill' };
+        } else {
+          const checked = card.querySelector('input[type=radio]:checked');
+          choices[slipNo] = { action: checked ? checked.value : 'auto-fill' };
+        }
+      });
+      resolve(choices);
+    };
+
+    modal.style.display = 'flex';
+  });
+}
+
+function balanceFillAutoAll() {
+  if (window._balanceFillResolve) {
+    const r = window._balanceFillResolve;
+    window._balanceFillResolve = null;
+    r(true);
+  }
+}
+function balanceFillConfirm() {
+  if (window._balanceFillResolve) {
+    const r = window._balanceFillResolve;
+    window._balanceFillResolve = null;
+    r(false);
+  }
+}
+function balanceFillCancel() {
+  if (window._balanceFillResolve) {
+    const r = window._balanceFillResolve;
+    window._balanceFillResolve = null;
+    r('cancel');
+  }
+}
+
+// ===========================================================================
 // 結果レンダリング
 // ===========================================================================
 
@@ -2642,6 +3022,7 @@ function renderResult(r) {
     <div id="dedup-result-section-anchor"></div>
     <div id="kauuri-rebate-result-section-anchor"></div>
     <div id="nontax-result-section-anchor"></div>
+    <div id="balance-fill-result-section-anchor"></div>
     ${howtoHTML}`;
 
   // 初期タブのテーブルを描画
@@ -2660,6 +3041,11 @@ function renderResult(r) {
   // 非課税対処結果セクション
   if (r.nonTaxableResults && r.nonTaxableResults.length > 0) {
     renderNonTaxableResultsSection(r.nonTaxableResults, r.outputFiles);
+  }
+
+  // 借貸補完対処結果セクション
+  if (r.balanceFillLog && r.balanceFillLog.length > 0) {
+    renderBalanceFillResultsSection(r.balanceFillLog, r.outputFiles);
   }
 }
 
@@ -2706,6 +3092,22 @@ function renderAuditSections(r) {
       <td>${escHtml(m.side)}</td><td>${m.amount.toLocaleString()}</td><td>${m.tax_amount.toLocaleString()}</td><td>${escHtml((m.summary||'').slice(0,30))}</td></tr>`).join('');
     sections.push({title:'[参考情報 ※件数外] 非仕入+税額あり (freeeエラーなし・対処任意)', count: audit.businessReview.length, type:'info', isRef: true,
       body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借/貸</th><th>本体</th><th>税額</th><th>摘要</th></tr></thead><tbody>${rows}</tbody></table>`});
+  }
+
+  // 借貸不一致補完ログ (r.balanceFillLog から)
+  if (r.balanceFillLog && r.balanceFillLog.length > 0) {
+    const filled = r.balanceFillLog.filter(e => e.action === 'auto-fill');
+    if (filled.length > 0) {
+      const rows = filled.map(m => {
+        const sign = m.diff >= 0 ? '+' : '';
+        return `<tr><td>${escHtml(m.slip_no||'')}</td><td>${escHtml(m.date||'')}</td>
+          <td style="text-align:right">${m.dr_total.toLocaleString()}</td><td style="text-align:right">${m.cr_total.toLocaleString()}</td>
+          <td style="text-align:right">${sign}${m.diff.toLocaleString()}</td>
+          <td>${escHtml(m.fill_side||'')}</td><td style="text-align:right">${m.fill_amount.toLocaleString()}</td><td>${escHtml(m.fill_kamoku||'')}</td></tr>`;
+      }).join('');
+      sections.push({title:'[要確認] 借貸不一致補完 (OBC原本欠陥伝票)', count: filled.length, type:'warn',
+        body:`<table class="audit-table"><thead><tr><th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th><th>補完側</th><th>補完金額</th><th>補完科目</th></tr></thead><tbody>${rows}</tbody></table>`});
+    }
   }
 
   // 取引先 A: 同コード異名
@@ -2975,6 +3377,170 @@ function renderNonTaxableResultsSection(results, outputFiles) {
   } else {
     document.getElementById('result-content').appendChild(section);
   }
+}
+
+// ===========================================================================
+// 借貸補完対処結果セクション (Step3)
+// ===========================================================================
+
+function renderBalanceFillResultsSection(results, outputFiles) {
+  const existing = document.getElementById('balance-fill-result-section');
+  if (existing) existing.remove();
+  if (!results || results.length === 0) return;
+
+  const firstOutput = outputFiles && outputFiles.length > 0 ? outputFiles[0].name : '';
+  const baseName = firstOutput.replace(/\.[^.]+$/, '') || '変換結果';
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const csvFilename = `借貸補完結果_${baseName}_${today}.csv`;
+
+  const anchor = document.getElementById('nontax-result-section-anchor');
+
+  const section = document.createElement('div');
+  section.id = 'balance-fill-result-section';
+  section.className = 'card';
+  section.style.marginBottom = '8px';
+
+  const headerDiv = document.createElement('div');
+  headerDiv.className = 'audit-header audit-section expanded';
+  headerDiv.style.cssText = 'cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--gray-50);';
+  const filled = results.filter(e => e.action === 'auto-fill').length;
+  const skipped = results.filter(e => e.action === 'skip').length;
+  const kept = results.filter(e => e.action === 'keep').length;
+  headerDiv.innerHTML = `
+    <span class="audit-title" style="font-size:13px;font-weight:600;flex:1;">借貸補完結果</span>
+    <span class="audit-badge" style="background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;">${results.length} 件 (補完: ${filled} / 除外: ${skipped} / 維持: ${kept})</span>
+    <span class="audit-chevron" style="font-size:12px;color:var(--gray-500);transition:transform 0.2s;transform:rotate(180deg);">▲</span>`;
+
+  const bodyDiv = document.createElement('div');
+  bodyDiv.className = 'audit-body open';
+  bodyDiv.style.cssText = 'padding:12px 14px;border-top:1px solid var(--gray-200);';
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;';
+
+  const btnDl = document.createElement('a');
+  btnDl.className = 'btn btn-success btn-sm';
+  btnDl.style.cssText = 'padding:6px 14px;font-size:13px;cursor:pointer;';
+  btnDl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;margin-right:4px;">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+    <polyline points="7 10 12 15 17 10"/>
+    <line x1="12" y1="15" x2="12" y2="3"/>
+  </svg>CSVダウンロード`;
+  btnDl.addEventListener('click', (e) => {
+    e.preventDefault();
+    const csvContent = buildBalanceFillCsv(results);
+    const bom = '﻿';
+    const blob = new Blob([bom + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = csvFilename; a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn btn-secondary btn-sm';
+  btnCopy.style.cssText = 'padding:6px 14px;font-size:13px;';
+  btnCopy.textContent = 'テキストエリアを開く / 閉じる';
+  let taVisible = false;
+  const ta = document.createElement('textarea');
+  ta.readOnly = true; ta.rows = 8;
+  ta.style.cssText = 'width:100%;font-size:12px;font-family:monospace;margin-top:8px;display:none;resize:vertical;';
+  ta.value = buildBalanceFillTabText(results);
+  btnCopy.addEventListener('click', () => {
+    taVisible = !taVisible;
+    ta.style.display = taVisible ? 'block' : 'none';
+    if (taVisible) ta.select();
+  });
+
+  btnRow.appendChild(btnDl); btnRow.appendChild(btnCopy);
+  bodyDiv.appendChild(btnRow); bodyDiv.appendChild(ta);
+
+  const table = document.createElement('table');
+  table.className = 'audit-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>伝票No</th><th>日付</th><th>借方合計</th><th>貸方合計</th><th>差</th>
+      <th>処理</th><th>補完側</th><th>補完金額</th><th>補完科目</th>
+    </tr></thead>`;
+  const tbody = document.createElement('tbody');
+  results.forEach(row => {
+    const tr = document.createElement('tr');
+    const diff = row.diff != null ? row.diff : (row.dr_total - row.cr_total);
+    const sign = diff >= 0 ? '+' : '';
+    const actionLabel = {
+      'auto-fill': '補完行追加',
+      'skip': '伝票除外',
+      'keep': '変更なし',
+    }[row.action] || row.action || '';
+    tr.innerHTML = `
+      <td>${escHtml(row.slip_no || '')}</td>
+      <td>${escHtml(row.date || '')}</td>
+      <td style="text-align:right">${(row.dr_total||0).toLocaleString()}</td>
+      <td style="text-align:right">${(row.cr_total||0).toLocaleString()}</td>
+      <td style="text-align:right;color:${Math.abs(diff)>0?'var(--orange)':''}">${sign}${diff.toLocaleString()}</td>
+      <td style="color:${row.action==='auto-fill'?'var(--blue)':row.action==='skip'?'var(--orange)':'var(--gray-500)'}">${escHtml(actionLabel)}</td>
+      <td>${escHtml(row.fill_side || '')}</td>
+      <td style="text-align:right">${row.fill_amount ? row.fill_amount.toLocaleString() : ''}</td>
+      <td><strong>${escHtml(row.fill_kamoku || '')}</strong></td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  bodyDiv.appendChild(table);
+
+  const chevron = headerDiv.querySelector('.audit-chevron');
+  headerDiv.addEventListener('click', () => {
+    const open = bodyDiv.classList.toggle('open');
+    chevron.style.transform = open ? 'rotate(180deg)' : 'rotate(0deg)';
+  });
+
+  section.appendChild(headerDiv); section.appendChild(bodyDiv);
+
+  if (anchor) {
+    anchor.parentNode.insertBefore(section, anchor);
+  } else {
+    document.getElementById('result-content').appendChild(section);
+  }
+}
+
+function buildBalanceFillCsv(results) {
+  const headers = ['伝票No', '日付', '借方合計', '貸方合計', '差', '処理', '補完側', '補完金額', '補完科目'];
+  const actionLabel = { 'auto-fill': '補完行追加', 'skip': '伝票除外', 'keep': '変更なし' };
+  const lines = [headers.join(',')];
+  results.forEach(row => {
+    const diff = row.diff != null ? row.diff : (row.dr_total - row.cr_total);
+    const sign = diff >= 0 ? '+' : '';
+    const cells = [
+      row.slip_no || '', row.date || '',
+      String(row.dr_total || 0), String(row.cr_total || 0),
+      sign + String(diff),
+      actionLabel[row.action] || row.action || '',
+      row.fill_side || '',
+      row.fill_amount ? String(row.fill_amount) : '',
+      row.fill_kamoku || '',
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`);
+    lines.push(cells.join(','));
+  });
+  return lines.join('\r\n');
+}
+
+function buildBalanceFillTabText(results) {
+  const headers = ['伝票No', '日付', '借方合計', '貸方合計', '差', '処理', '補完側', '補完金額', '補完科目'];
+  const actionLabel = { 'auto-fill': '補完行追加', 'skip': '伝票除外', 'keep': '変更なし' };
+  const lines = [headers.join('\t')];
+  results.forEach(row => {
+    const diff = row.diff != null ? row.diff : (row.dr_total - row.cr_total);
+    const sign = diff >= 0 ? '+' : '';
+    lines.push([
+      row.slip_no || '', row.date || '',
+      String(row.dr_total || 0), String(row.cr_total || 0),
+      sign + String(diff),
+      actionLabel[row.action] || row.action || '',
+      row.fill_side || '',
+      row.fill_amount ? String(row.fill_amount) : '',
+      row.fill_kamoku || '',
+    ].join('\t'));
+  });
+  return lines.join('\n');
 }
 
 // ===========================================================================
@@ -3355,6 +3921,8 @@ function saveSettings() {
       knownMismatches: document.getElementById('opt-known-mismatches').value,
       kauuriRebateStrategy: (document.getElementById('opt-kauuri-rebate-strategy') || {value: 'warn-only'}).value,
       kauuriRebateKamoku: (document.getElementById('opt-kauuri-rebate-kamoku') || {value: '売上値引高'}).value,
+      balanceFillStrategy: (document.getElementById('opt-balance-fill-strategy') || {value: 'auto-fill'}).value,
+      balanceFillAccount: (document.getElementById('opt-balance-fill-account') || {value: '仮受消費税'}).value,
     }));
   } catch(e) {}
 }
@@ -3384,6 +3952,14 @@ function loadSettings() {
     if (s.kauuriRebateKamoku) {
       const el = document.getElementById('opt-kauuri-rebate-kamoku');
       if (el) { el.value = s.kauuriRebateKamoku; toggleKauuriCustomKamoku(); }
+    }
+    if (s.balanceFillStrategy) {
+      const el = document.getElementById('opt-balance-fill-strategy');
+      if (el) { el.value = s.balanceFillStrategy; toggleBalanceFillOptions(); }
+    }
+    if (s.balanceFillAccount) {
+      const el = document.getElementById('opt-balance-fill-account');
+      if (el) { el.value = s.balanceFillAccount; toggleBalanceFillCustomAccount(); }
     }
   } catch(e) {}
 }

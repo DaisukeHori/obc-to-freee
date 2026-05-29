@@ -225,6 +225,10 @@ python obc_to_freee.py --input 奉行_勘定奉行仕分伝票データ上.csv �
 | `--non-taxable-mismatch-strategy` | — | `warn-only` | 「非売上」区分+税額あり矛盾行の対処戦略 (`warn-only` / `zero-tax` / `change-to-taxable` / `interactive` / `custom`) |
 | `--kauuri-rebate-strategy` | — | `warn-only` | 「課売上」区分+マイナス金額行の振替戦略 (`warn-only` / `auto-rebate` / `custom`) |
 | `--kauuri-rebate-kamoku` | — | `売上値引高` | `auto-rebate` 戦略で振替先に使う勘定科目名 |
+| `--balance-fill-strategy` | — | `auto-fill` | 借貸不一致伝票の補完戦略 (`warn-only` / `auto-fill` / `skip` / `custom`) |
+| `--balance-fill-account` | — | `仮受消費税` | 補完行の勘定科目名 (`auto-fill` 戦略時) |
+| `--balance-fill-custom-json` | — | — | `custom` 戦略時の選択を JSON ファイルで指定 |
+| `--detect-balance-fill-only` | — | — | 借貸不一致伝票の検出結果のみ JSON で stdout 出力して終了 |
 
 ### 期間カット例
 
