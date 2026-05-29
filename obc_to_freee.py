@@ -1311,6 +1311,167 @@ def apply_kauuri_rebate(groups: OrderedDict,
 
 
 # ---------------------------------------------------------------------------
+# 借貸不一致補完 (apply_balance_fill_strategy)
+# ---------------------------------------------------------------------------
+
+def _detect_balance_fill_mismatches(all_groups: dict) -> list:
+    """
+    グループ化済みデータから借貸不一致伝票を検出して返す。
+    戻り値: [{"slip_no": ..., "date": ..., "dr_total": ..., "cr_total": ..., "diff": ...}, ...]
+    """
+    results = []
+    for key, slip_rows in all_groups.items():
+        slip_no = key[1] if isinstance(key, tuple) and len(key) >= 2 else str(key)
+        date_str = key[0] if isinstance(key, tuple) and len(key) >= 1 else ""
+        dr_total = 0
+        cr_total = 0
+        for r in slip_rows:
+            try:
+                dr_total += int(str(r.get("dr_amount", "0")).strip() or "0")
+            except (ValueError, TypeError):
+                pass
+            try:
+                cr_total += int(str(r.get("cr_amount", "0")).strip() or "0")
+            except (ValueError, TypeError):
+                pass
+        if dr_total != cr_total:
+            results.append({
+                "slip_no": slip_no,
+                "date": date_str,
+                "dr_total": dr_total,
+                "cr_total": cr_total,
+                "diff": dr_total - cr_total,
+            })
+    return results
+
+
+def apply_balance_fill_strategy(all_groups: dict, strategy: str, fill_account: str,
+                                custom_choices: dict = None):
+    """
+    借貸不一致の伝票に補完行を追加する。
+
+    strategy:
+      'warn-only'  — 警告のみ、グループ変更なし
+      'auto-fill'  — 全件自動補完 (デフォルト推奨)
+      'skip'       — 不一致伝票を除外
+      'custom'     — custom_choices に従って件別処理
+
+    fill_account: 補完行の勘定科目名 (デフォルト: 仮受消費税)
+    custom_choices: {"slip_no": {"action": "auto-fill"|"skip"|"keep"}, ...}
+
+    戻り値: (updated_groups, balance_fill_log, skip_slips)
+      balance_fill_log: [{slip_no, date, dr_total, cr_total, diff, fill_side, fill_amount, fill_kamoku, action}, ...]
+      skip_slips: skip された伝票番号のセット
+    """
+    from collections import OrderedDict as _OD
+
+    if strategy == "warn-only":
+        return all_groups, [], set()
+
+    mismatches = _detect_balance_fill_mismatches(all_groups)
+    if not mismatches:
+        return all_groups, [], set()
+
+    # slip_no → mismatch 情報のマップ
+    mismatch_map = {m["slip_no"]: m for m in mismatches}
+
+    updated_groups = _OD()
+    balance_fill_log = []
+    skip_slips = set()
+
+    for key, slip_rows in all_groups.items():
+        slip_no = key[1] if isinstance(key, tuple) and len(key) >= 2 else str(key)
+        date_str = key[0] if isinstance(key, tuple) and len(key) >= 1 else ""
+
+        if slip_no not in mismatch_map:
+            # 不一致なし → そのまま
+            updated_groups[key] = slip_rows
+            continue
+
+        m = mismatch_map[slip_no]
+        dr_total = m["dr_total"]
+        cr_total = m["cr_total"]
+        diff = m["diff"]  # dr_total - cr_total
+
+        # custom 選択を解決
+        if strategy == "custom":
+            choice = (custom_choices or {}).get(slip_no, {"action": "auto-fill"})
+            action = choice.get("action", "auto-fill")
+        elif strategy == "skip":
+            action = "skip"
+        else:
+            action = "auto-fill"
+
+        if action == "skip":
+            # 伝票全行を除外
+            skip_slips.add(slip_no)
+            balance_fill_log.append({
+                "slip_no": slip_no, "date": date_str,
+                "dr_total": dr_total, "cr_total": cr_total, "diff": diff,
+                "fill_side": "", "fill_amount": 0, "fill_kamoku": "",
+                "action": "skip",
+            })
+            # updated_groups にキーを追加しない → 除外
+            continue
+
+        if action == "keep":
+            # そのまま維持
+            updated_groups[key] = slip_rows
+            balance_fill_log.append({
+                "slip_no": slip_no, "date": date_str,
+                "dr_total": dr_total, "cr_total": cr_total, "diff": diff,
+                "fill_side": "", "fill_amount": 0, "fill_kamoku": "",
+                "action": "keep",
+            })
+            continue
+
+        # auto-fill: 補完行を追加
+        # diff > 0 → 借方超過 → 貸方に補完
+        # diff < 0 → 貸方超過 → 借方に補完
+        fill_amount = abs(diff)
+        fill_side = "貸方" if diff > 0 else "借方"
+
+        # テンプレート行を作成 (最初の行から日付・伝票番号等を引き継ぐ)
+        tmpl = slip_rows[0]
+        fill_row = {
+            "date": tmpl.get("date", date_str),
+            "slip_no": slip_no,
+            "summary": tmpl.get("summary", ""),
+            "bumon": tmpl.get("dr_bumon", "") or tmpl.get("cr_bumon", ""),
+            # 借方側
+            "dr_kamoku": fill_account if fill_side == "借方" else "",
+            "dr_hojo": "",
+            "dr_bumon": tmpl.get("dr_bumon", "") if fill_side == "借方" else "",
+            "dr_amount": str(fill_amount) if fill_side == "借方" else "",
+            "dr_tax_code": "対象外" if fill_side == "借方" else "",
+            "dr_tax_label_raw": "対象外" if fill_side == "借方" else "",
+            "dr_tax_amount": "0" if fill_side == "借方" else "",
+            "dr_partner": "",
+            "dr_partner_code": "",
+            # 貸方側
+            "cr_kamoku": fill_account if fill_side == "貸方" else "",
+            "cr_hojo": "",
+            "cr_bumon": tmpl.get("cr_bumon", "") if fill_side == "貸方" else "",
+            "cr_amount": str(fill_amount) if fill_side == "貸方" else "",
+            "cr_tax_code": "対象外" if fill_side == "貸方" else "",
+            "cr_tax_label_raw": "対象外" if fill_side == "貸方" else "",
+            "cr_tax_amount": "0" if fill_side == "貸方" else "",
+            "cr_partner": "",
+            "cr_partner_code": "",
+        }
+
+        updated_groups[key] = list(slip_rows) + [fill_row]
+        balance_fill_log.append({
+            "slip_no": slip_no, "date": date_str,
+            "dr_total": dr_total, "cr_total": cr_total, "diff": diff,
+            "fill_side": fill_side, "fill_amount": fill_amount, "fill_kamoku": fill_account,
+            "action": "auto-fill",
+        })
+
+    return updated_groups, balance_fill_log, skip_slips
+
+
+# ---------------------------------------------------------------------------
 # グループ処理 (Transformation 1 適用)
 # ---------------------------------------------------------------------------
 
@@ -2214,7 +2375,8 @@ def _detect_kauuri_mismatches(input_files: list, date_from=None, date_to=None,
 
 def audit_obc_source(input_files: list, date_from=None, date_to=None,
                      quiet: bool = False, encoding: str = "auto",
-                     kauuri_rebate_log: list = None):
+                     kauuri_rebate_log: list = None,
+                     balance_fill_log: list = None):
     """
     奉行原本 CSV を直接走査して以下の3種を stderr に出力する。
       A: 伝票単位の借貸不一致 (借方本体金額, 貸方本体金額 カラムで集計)
@@ -2475,6 +2637,43 @@ def audit_obc_source(input_files: list, date_from=None, date_to=None,
     print("   「非課売上区分」と業務確認用の両方に同じ伝票番号が表示されます。", file=sys.stderr)
     print(sep, file=sys.stderr)
 
+    # --- [要確認] 借貸不一致補完セクション ---
+    if balance_fill_log:
+        print("", file=sys.stderr)
+        print(sep, file=sys.stderr)
+        print("[要確認] 借貸不一致補完 (OBC原本欠陥伝票への補完行追加)", file=sys.stderr)
+        print(sep, file=sys.stderr)
+        print("以下の伝票は OBC 原本時点で借方合計 ≠ 貸方合計でした。", file=sys.stderr)
+        print("freee インポート後の借貸整合のため、補完行が自動追加されました。", file=sys.stderr)
+        print("補完行の勘定科目・金額を経理担当が確認し、必要に応じて freee で修正してください。", file=sys.stderr)
+        print("", file=sys.stderr)
+        for entry in balance_fill_log:
+            action = entry.get("action", "")
+            slip_no = entry.get("slip_no", "")
+            date_str = entry.get("date", "")
+            dr_t = entry.get("dr_total", 0)
+            cr_t = entry.get("cr_total", 0)
+            diff = entry.get("diff", 0)
+            fill_side = entry.get("fill_side", "")
+            fill_amount = entry.get("fill_amount", 0)
+            fill_kamoku = entry.get("fill_kamoku", "")
+            sign = "+" if diff >= 0 else ""
+            if action == "auto-fill":
+                print(
+                    f"  No. {slip_no} ({date_str}) 借方{dr_t:,}/貸方{cr_t:,}/差{sign}{diff:,} "
+                    f"→ {fill_side}に {fill_amount:,}円 ({fill_kamoku}) 補完",
+                    file=sys.stderr,
+                )
+            elif action == "skip":
+                print(f"  No. {slip_no} ({date_str}) → 除外 (不一致: 差{sign}{diff:,})", file=sys.stderr)
+            elif action == "keep":
+                print(f"  No. {slip_no} ({date_str}) → 維持 (不一致: 差{sign}{diff:,})", file=sys.stderr)
+        filled = sum(1 for e in balance_fill_log if e.get("action") == "auto-fill")
+        skipped = sum(1 for e in balance_fill_log if e.get("action") == "skip")
+        kept = sum(1 for e in balance_fill_log if e.get("action") == "keep")
+        print(f"  合計 {len(balance_fill_log)} 件 (補完: {filled} / 除外: {skipped} / 維持: {kept})", file=sys.stderr)
+        print(sep, file=sys.stderr)
+
 
 # ---------------------------------------------------------------------------
 # メイン
@@ -2624,6 +2823,44 @@ def main():
             "GUI の対話フロー Phase 1 で使用。"
         ),
     )
+    parser.add_argument(
+        "--balance-fill-strategy",
+        dest="balance_fill_strategy",
+        choices=["warn-only", "auto-fill", "skip", "custom"],
+        default="auto-fill",
+        help=(
+            "借貸不一致伝票の補完戦略 (デフォルト: auto-fill)。"
+            "warn-only=警告のみ / "
+            "auto-fill=自動補完行追加 (推奨、OBC原本欠陥伝票に対処) / "
+            "skip=不一致伝票を除外 / "
+            "custom=--balance-fill-custom-json で件別指定"
+        ),
+    )
+    parser.add_argument(
+        "--balance-fill-account",
+        dest="balance_fill_account",
+        default="仮受消費税",
+        help="auto-fill / custom 時の補完勘定科目 (デフォルト: 仮受消費税)。例: 現金過不足",
+    )
+    parser.add_argument(
+        "--balance-fill-custom-json",
+        dest="balance_fill_custom_json",
+        default=None,
+        help=(
+            "--balance-fill-strategy=custom 時のカスタム選択 JSON ファイルパス。"
+            'フォーマット: {"<伝票No>": {"action": "auto-fill"|"skip"|"keep"}, ...}'
+        ),
+    )
+    parser.add_argument(
+        "--detect-balance-fill-only",
+        dest="detect_balance_fill_only",
+        action="store_true",
+        default=False,
+        help=(
+            "借貸不一致伝票を検出して JSON 形式で stdout に出力し、変換は行わない。"
+            "GUI の対話フロー Phase 1 で使用。"
+        ),
+    )
     args = parser.parse_args()
 
     # 期間パース
@@ -2674,6 +2911,12 @@ def main():
             args.input, date_from, date_to, encoding=args.encoding
         )
         print(json.dumps({"success": True, "kauuriMismatches": detected}, ensure_ascii=False, indent=2))
+        return
+
+    # --detect-balance-fill-only モード: 借貸不一致伝票を検出して JSON 出力して終了
+    if args.detect_balance_fill_only:
+        mismatches = _detect_balance_fill_mismatches(all_groups)
+        print(json.dumps({"success": True, "balanceFillMismatches": mismatches}, ensure_ascii=False, indent=2))
         return
 
     # --detect-duplicates-only モード: 同名異コード検出して JSON 出力して終了
@@ -2756,6 +2999,33 @@ def main():
             custom_choices=kauuri_rebate_custom,
         )
         print(f"[課売返] 振替変換: {len(kauuri_rebate_log)} 件処理", file=sys.stderr)
+
+    # 借貸不一致補完戦略準備
+    balance_fill_custom: dict = None
+    if args.balance_fill_strategy == "custom" and args.balance_fill_custom_json:
+        try:
+            with open(args.balance_fill_custom_json, "r", encoding="utf-8") as _f:
+                balance_fill_custom = json.load(_f)
+            print(f"[借貸補完] custom 選択 JSON 読み込み: {args.balance_fill_custom_json} ({len(balance_fill_custom)} 件)")
+        except Exception as e:
+            print(f"[借貸補完] custom JSON 読み込み失敗: {e} — auto-fill にフォールバック", file=sys.stderr)
+            args.balance_fill_strategy = "auto-fill"
+
+    # 借貸不一致補完 (kauuri 振替後、process_groups の前に適用)
+    balance_fill_log = []
+    skip_slips: set = set()
+    if args.balance_fill_strategy != "warn-only":
+        all_groups, balance_fill_log, skip_slips = apply_balance_fill_strategy(
+            all_groups,
+            strategy=args.balance_fill_strategy,
+            fill_account=args.balance_fill_account,
+            custom_choices=balance_fill_custom,
+        )
+        if balance_fill_log:
+            filled = sum(1 for e in balance_fill_log if e.get("action") == "auto-fill")
+            skipped = len(skip_slips)
+            kept = sum(1 for e in balance_fill_log if e.get("action") == "keep")
+            print(f"[借貸補完] 不一致 {len(balance_fill_log)} 件 (補完: {filled} / 除外: {skipped} / 維持: {kept})", file=sys.stderr)
 
     # 非課税+税額矛盾の対処準備
     non_taxable_custom: dict = None
@@ -2878,7 +3148,8 @@ def main():
     # Warning-1: kauuri 振替済伝票を課売上マイナス警告から除外するためログを渡す
     audit_obc_source(args.input, date_from, date_to,
                      quiet=args.quiet_audit, encoding=args.encoding,
-                     kauuri_rebate_log=kauuri_rebate_log)
+                     kauuri_rebate_log=kauuri_rebate_log,
+                     balance_fill_log=balance_fill_log if balance_fill_log else None)
 
     # 元伝票詳細 JSON (stderr、GUI が抽出して使用)
     # Warning-3/4: original_groups (振替前スナップショット) から構築して奉行原本を表示
@@ -2923,6 +3194,10 @@ def main():
     # 課売返振替結果 JSON (stderr、GUI が抽出して使用)
     if kauuri_rebate_log and args.kauuri_rebate_strategy != "warn-only":
         print(f"KAUURI_REBATE_JSON:{json.dumps(kauuri_rebate_log, ensure_ascii=False)}", file=sys.stderr)
+
+    # 借貸補完結果 JSON (stderr、GUI が抽出して使用)
+    if balance_fill_log and args.balance_fill_strategy != "warn-only":
+        print(f"BALANCE_FILL_JSON:{json.dumps(balance_fill_log, ensure_ascii=False)}", file=sys.stderr)
 
     # エラーレポート (stderr)
     _errors.print_report(
